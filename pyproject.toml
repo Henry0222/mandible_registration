@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mandible-registration"
+version = "1.0.0"
+description = "Six-mesh rigid workflow for mandibular pose transfer and condyle comparison"
+readme = "README.md"
+license = "BSD-3-Clause"
+authors = [{ name = "Henry0222" }]
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "general-model-registration==2.0.0",
+    "numpy==2.5.1",
+    "open3d==0.19.0",
+    "PySide6==6.11.1",
+    "vtk==9.6.2",
+    "fonttools==4.63.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2,<2",
+    "pytest>=8,<9",
+    "pyinstaller>=6.10,<7",
+]
+
+[project.gui-scripts]
+mandible-registration = "mandible_registration.gui:main"
+
+[project.urls]
+Homepage = "https://github.com/Henry0222/mandible_registration"
+Repository = "https://github.com/Henry0222/mandible_registration"
+Issues = "https://github.com/Henry0222/mandible_registration/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mandible_registration = ["assets/*.svg", "assets/*.ico"]
+
+[tool.pytest.ini_options]
+addopts = "-q --basetemp=.pytest-tmp"
+testpaths = ["tests"]
+pythonpath = ["src"]

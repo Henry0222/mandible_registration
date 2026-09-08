@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+htmlcov/
+
+# Environments, tests and local tools
+.venv/
+.venv-*/
+.pytest_cache/
+.pytest-tmp*/
+.mypy_cache/
+.ruff_cache/
+
+# Builds and generated results
+build/
+dist/
+outputs/
+*.log
+
+# Patient scans and 3D/medical datasets are never source-controlled
+*.stl
+*.STL
+*.ply
+*.obj
+*.off
+*.3mf
+*.dcm
+*.nii
+*.nii.gz
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
