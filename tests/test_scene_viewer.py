@@ -57,6 +57,7 @@ def test_polydata_preserves_geometry():
     assert data.GetPoint(1) == tuple(np.asarray(mesh.vertices)[1])
 
 def test_viewer_starts_with_only_bones_visible_and_has_no_rainbow_controls(viewer):
+    assert viewer.renderer.GetActiveCamera().GetParallelProjection()
     assert viewer.actors["ct_mandible_t0"].GetVisibility()
     assert viewer.actors["ct_mandible_t1"].GetVisibility()
     assert not viewer.actors["baseline_lower"].GetVisibility()
@@ -78,6 +79,7 @@ def test_viewer_starts_with_only_bones_visible_and_has_no_rainbow_controls(viewe
 def test_signed_axis_views_place_camera_on_requested_side(viewer, axis, expected):
     viewer._axis_view(axis)
     camera = viewer.renderer.GetActiveCamera()
+    assert camera.GetParallelProjection()
     direction = np.asarray(camera.GetPosition()) - np.asarray(camera.GetFocalPoint())
     direction /= np.linalg.norm(direction)
     np.testing.assert_allclose(direction, expected, atol=1e-8)
@@ -484,16 +486,74 @@ def test_main_view_mouse_mapping_and_no_manual_picker(viewer):
         ):
             QApplication.sendEvent(viewer.vtk_widget, QMouseEvent(kind, pos, pos, changed, held, Qt.KeyboardModifier.NoModifier))
     distance = camera.GetDistance()
+    scale = camera.GetParallelScale()
     focal = np.array(camera.GetFocalPoint())
     drag(Qt.MouseButton.RightButton)
-    assert camera.GetDistance() > distance
+    assert camera.GetParallelScale() > scale
+    assert camera.GetDistance() == pytest.approx(distance)
     np.testing.assert_allclose(camera.GetFocalPoint(), focal)
-    distance = camera.GetDistance()
+    scale = camera.GetParallelScale()
     drag(Qt.MouseButton.MiddleButton)
     assert camera.GetDistance() == pytest.approx(distance)
+    assert camera.GetParallelScale() == pytest.approx(scale)
     assert not np.allclose(camera.GetFocalPoint(), focal)
     assert not hasattr(viewer, "measure_mode") and not hasattr(viewer, "add_anchor")
     assert not hasattr(viewer, "section_info") and not hasattr(viewer, "show_section_planes")
+
+
+def test_parallel_projection_keeps_equal_lengths_at_different_depths(viewer):
+    viewer._axis_view("+Z")
+    camera = viewer.renderer.GetActiveCamera()
+    focal = np.array(camera.GetFocalPoint())
+
+    def display(point):
+        viewer.renderer.SetWorldPoint(*point, 1)
+        viewer.renderer.WorldToDisplay()
+        return np.array(viewer.renderer.GetDisplayPoint()[:2])
+
+    lengths = []
+    for depth in (-10, 10):
+        start = focal + [0, 0, depth]
+        lengths.append(np.linalg.norm(display(start + [5, 0, 0]) - display(start)))
+    assert lengths[0] == pytest.approx(lengths[1])
+
+
+def test_parallel_reset_fits_bone_around_off_center_condyle_pivot(viewer):
+    viewer._rotation_center = np.array([30., -25., 60.])
+    viewer.rotate(50, 25)
+    viewer._reset_camera()
+    camera = viewer.renderer.GetActiveCamera()
+    np.testing.assert_allclose(camera.GetFocalPoint(), viewer._rotation_center)
+    bounds = viewer.renderer.ComputeVisiblePropBounds()
+    width, height = viewer.render_window.GetSize()
+    for x in bounds[:2]:
+        for y in bounds[2:4]:
+            for z in bounds[4:]:
+                viewer.renderer.SetWorldPoint(x, y, z, 1)
+                viewer.renderer.WorldToDisplay()
+                px, py, pz = viewer.renderer.GetDisplayPoint()
+                assert 0 < px < width and 0 < py < height
+                assert 0 <= pz <= 1
+
+
+def test_default_view_ratios_survive_section_activation_and_allow_manual_resize(viewer, app, monkeypatch):
+    left, right = viewer.centralWidget().sizes()
+    top, bottom = viewer.view_splitter.sizes()
+    assert left / right == pytest.approx(1 / 4, abs=.005)
+    assert top / bottom == pytest.approx(3 / 2, abs=.01)
+    assert viewer.centralWidget().widget(0).horizontalScrollBar().maximum() == 0
+    enable_test_sections(viewer, app, monkeypatch)
+    app.processEvents()
+    top, bottom = viewer.view_splitter.sizes()
+    assert top / bottom == pytest.approx(3 / 2, abs=.01)
+    assert viewer.centralWidget().widget(0).horizontalScrollBar().maximum() == 0
+    viewer.centralWidget().setSizes([400, 1000])
+    viewer.view_splitter.setSizes([450, 400])
+    custom = (viewer.centralWidget().sizes(), viewer.view_splitter.sizes())
+    viewer.hide()
+    viewer.show()
+    app.processEvents()
+    assert (viewer.centralWidget().sizes(), viewer.view_splitter.sizes()) == custom
 
 
 def test_comparison_window_is_independent_from_main_window(viewer, app):

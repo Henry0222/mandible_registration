@@ -112,6 +112,8 @@ def main():
         wait_for_task(app, window)
         load_seconds = time.perf_counter() - start
         assert window.scene and not window.section_views
+        assert window.renderer.GetActiveCamera().GetParallelProjection()
+        assert window.centralWidget().widget(0).horizontalScrollBar().maximum() == 0
         assert window.palette().color(QPalette.ColorRole.Window).lightness() > 200
         print(f"Loaded existing meshes in {load_seconds:.3f}s; sections remain lazy", flush=True)
         start = time.perf_counter()
@@ -178,6 +180,10 @@ def main():
         (root / "measurements.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         result = {"native": args.native, "synthetic": args.project is None, "load_seconds": load_seconds,
                   "enable_seconds": enable_seconds, "stl_read_count": len(reads), "roi": counts,
+                  "parallel_projection": bool(window.renderer.GetActiveCamera().GetParallelProjection()),
+                  "sidebar_and_view_widths": window.centralWidget().sizes(),
+                  "upper_and_lower_heights": window.view_splitter.sizes(),
+                  "sidebar_horizontal_scroll_max": window.centralWidget().widget(0).horizontalScrollBar().maximum(),
                   "timing": timings, "warnings": warnings}
         assert not warnings, warnings
         assert project.read_bytes() == original_project

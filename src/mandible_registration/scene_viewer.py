@@ -10,8 +10,8 @@ from PySide6.QtCore import QSize, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QGroupBox,
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPushButton, QScrollArea, QSlider, QSplitter, QVBoxLayout, QWidget, QColorDialog,
+    QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter, QVBoxLayout, QWidget, QColorDialog,
 )
 from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
@@ -143,6 +143,7 @@ class SceneViewer(QMainWindow):
         self.section_sources = {}
         self._section_planes = {}
         self._sections_enabled = False
+        self._default_layout_applied = False
         self._section_render_timer = QTimer(self)
         self._section_render_timer.setSingleShot(True)
         self._section_render_timer.setInterval(33)
@@ -155,12 +156,10 @@ class SceneViewer(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(self.sidebar)
-        scroll.setMinimumWidth(345)
+        scroll.setMinimumWidth(240)
         splitter.addWidget(scroll)
 
-        self.models_group = models_group = QGroupBox(
-            "模型显隐（四个口扫 + 两个全牙列 + 两个下颌骨 + 上颌骨）"
-        )
+        self.models_group = models_group = QGroupBox("模型显隐")
         model_layout = QVBoxLayout(models_group)
         self.model_list = QListWidget()
         self.model_list.setIconSize(QSize(14, 14))
@@ -168,22 +167,24 @@ class SceneViewer(QMainWindow):
         self.model_list.itemChanged.connect(self._visibility_changed)
         self.model_list.currentItemChanged.connect(self._selected_model)
         model_layout.addWidget(self.model_list)
-        buttons = QHBoxLayout()
-        for text, callback in (
+        buttons = QGridLayout()
+        for index, (text, callback) in enumerate((
             ("下颌骨", lambda: self._set_preset("bones")),
             ("关节", lambda: self._set_preset("joint")),
             ("CT 配准", lambda: self._set_preset("ct")),
             ("隐藏", lambda: self._set_preset("none")),
-        ):
+        )):
             button = QPushButton(text)
             button.clicked.connect(callback)
-            buttons.addWidget(button)
+            buttons.addWidget(button, index // 2, index % 2)
         model_layout.addLayout(buttons)
         self.opacity = QSlider(Qt.Orientation.Horizontal)
         self.opacity.setRange(0, 100)
         self.opacity.setValue(100)
         self.opacity.valueChanged.connect(self._change_opacity)
-        model_layout.addWidget(QLabel("选中模型透明度（左侧透明，右侧不透明）"))
+        opacity_hint = QLabel("选中模型透明度（左侧透明，右侧不透明）")
+        opacity_hint.setWordWrap(True)
+        model_layout.addWidget(opacity_hint)
         model_layout.addWidget(self.opacity)
         color = QPushButton("更改选中模型的颜色")
         color.clicked.connect(self._change_color)
@@ -194,6 +195,9 @@ class SceneViewer(QMainWindow):
         condyle_layout = QVBoxLayout(condyles)
         self.condyle_info = QLabel("可在主界面“颌骨”的选区按钮中指定左右髁突。")
         self.condyle_info.setWordWrap(True)
+        info_policy = self.condyle_info.sizePolicy()
+        info_policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+        self.condyle_info.setSizePolicy(info_policy)
         self.condyle_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         condyle_layout.addWidget(self.condyle_info)
         self.show_condyles = QCheckBox("显示中心位移线")
@@ -233,6 +237,7 @@ class SceneViewer(QMainWindow):
         self.render_window.SetAlphaBitPlanes(1)
         self.render_window.SetNumberOfLayers(2)
         self.renderer = vtkRenderer()
+        self.renderer.GetActiveCamera().ParallelProjectionOn()
         self.renderer.SetBackground(0.08, 0.105, 0.15)
         self.renderer.SetBackground2(0.19, 0.23, 0.30)
         self.renderer.GradientBackgroundOn()
@@ -293,16 +298,31 @@ class SceneViewer(QMainWindow):
             self.section_cards[key], self.section_labels[key], self.section_layouts[key] = card, label, content
             lower.addWidget(card)
         self.view_splitter.addWidget(lower)
-        self.view_splitter.setStretchFactor(0, 3)
-        self.view_splitter.setStretchFactor(1, 2)
-        self.view_splitter.setSizes([440, 390])
+        self.view_splitter.setStretchFactor(0, 1)
+        self.view_splitter.setStretchFactor(1, 1)
         right_layout.addWidget(self.view_splitter, 1)
         legend = QLabel("左拖旋转 · 中拖平移 · 右拖缩放 · 三维滚轮缩放 / 剖面滚轮移层")
         legend.setWordWrap(True)
         right_layout.addWidget(legend)
         splitter.addWidget(right)
-        splitter.setSizes([410, 1030])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
         self.statusBar().showMessage("等待加载配准结果…")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._default_layout_applied:
+            self._default_layout_applied = True
+            # Apply after the first layout has its actual window dimensions.
+            # Reopening a cached window preserves the user's divider positions.
+            QTimer.singleShot(0, self._set_default_view_sizes)
+
+    def _set_default_view_sizes(self):
+        splitter = self.centralWidget()
+        width = max(splitter.width() - splitter.handleWidth(), 1)
+        splitter.setSizes([width // 5, width - width // 5])
+        height = max(self.view_splitter.height() - self.view_splitter.handleWidth(), 1)
+        self.view_splitter.setSizes([height * 3 // 5, height - height * 3 // 5])
 
     def _run_task(self, operation, callback, message):
         if self._thread is not None:
@@ -614,9 +634,9 @@ class SceneViewer(QMainWindow):
             self.model_list.setFixedHeight(max(height, 60))
             self.model_list.setCurrentRow(0)
             self.models_group.setTitle(
-                "CT 配准检查（全牙列.1 + 下颌口扫.1）"
+                "CT 配准检查"
                 if inspection
-                else "模型显隐（四个口扫 + 两个全牙列 + 两个下颌骨 + 上颌骨）"
+                else "模型显隐"
             )
             self.annotation_renderer.SetDraw(not inspection)
             self._redraw_measurements()
@@ -671,9 +691,11 @@ class SceneViewer(QMainWindow):
             self.render_window.Render()
 
     def _reset_camera(self):
+        camera = self.renderer.GetActiveCamera()
+        camera.ParallelProjectionOn()
         self.renderer.ResetCamera()
         if self._rotation_center is not None and not self._inspection_active:
-            camera = self.renderer.GetActiveCamera()
+            camera.OrthogonalizeViewUp()
             normal = -np.array(camera.GetDirectionOfProjection())
             bounds = self.renderer.ComputeVisiblePropBounds()
             if bounds[0] <= bounds[1]:
@@ -681,11 +703,13 @@ class SceneViewer(QMainWindow):
                 up = unit(camera.GetViewUp())
                 right = unit(np.cross(up, normal))
                 relative = corners - self._rotation_center
-                tangent = np.tan(np.deg2rad(camera.GetViewAngle() / 2))
                 aspect = max(self.vtk_widget.width(), 1) / max(self.vtk_widget.height(), 1)
-                extent = np.maximum(np.abs(relative @ up) / tangent,
-                                    np.abs(relative @ right) / (tangent * aspect))
-                distance = max(float(np.max(relative @ normal + extent)), 1) * 1.06
+                # ParallelScale is the viewport's half-height in world units.
+                # Fit around the condyle pivot, which can be far above the bone.
+                extent = max(float(np.max(np.abs(relative @ up))),
+                             float(np.max(np.abs(relative @ right))) / aspect)
+                camera.SetParallelScale(max(extent * 1.06, .5))
+                distance = max(camera.GetDistance(), float(np.max(relative @ normal)) + 1, 1)
                 camera.SetFocalPoint(*self._rotation_center)
                 camera.SetPosition(*(self._rotation_center + normal * distance))
         self.renderer.ResetCameraClippingRange()
@@ -710,8 +734,7 @@ class SceneViewer(QMainWindow):
         camera = self.renderer.GetActiveCamera()
         up = unit(camera.GetViewUp())
         right = unit(np.cross(up, -np.array(camera.GetDirectionOfProjection())))
-        height_mm = (2 * camera.GetParallelScale() if camera.GetParallelProjection() else
-                     2 * camera.GetDistance() * np.tan(np.deg2rad(camera.GetViewAngle() / 2)))
+        height_mm = 2 * camera.GetParallelScale()
         shift = (-dx * right + dy * up) * height_mm / max(self.vtk_widget.height(), 1)
         camera.SetPosition(*(np.array(camera.GetPosition()) + shift))
         camera.SetFocalPoint(*(np.array(camera.GetFocalPoint()) + shift))
@@ -719,11 +742,7 @@ class SceneViewer(QMainWindow):
 
     def zoom(self, factor, *, interactive=False):
         camera = self.renderer.GetActiveCamera()
-        if camera.GetParallelProjection():
-            camera.SetParallelScale(float(np.clip(camera.GetParallelScale() * factor, .5, 1000)))
-        else:
-            desired = float(np.clip(camera.GetDistance() * factor, 1, 10000))
-            camera.Dolly(camera.GetDistance() / desired)
+        camera.SetParallelScale(float(np.clip(camera.GetParallelScale() * factor, .5, 1000)))
         self._schedule_camera() if interactive else self.finish_interaction()
 
     def scroll(self, steps):

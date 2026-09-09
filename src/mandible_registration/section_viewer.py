@@ -89,7 +89,7 @@ class SectionView(QWidget):
         controls.addStretch(1)
         layout.addLayout(controls)
         self.vtk_widget = OffscreenVtkWidget(self) if offscreen else QVTKRenderWindowInteractor(self)
-        self.vtk_widget.setMinimumHeight(220)
+        self.vtk_widget.setMinimumHeight(120)
         self.render_window = self.vtk_widget.GetRenderWindow()
         self.render_window.SetMultiSamples(0)
         self.renderer = vtkRenderer()
