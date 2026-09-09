@@ -22,6 +22,26 @@ def test_measurement_geometry():
         length_mm([[0, 0, 0], [np.nan, 0, 0]])
 
 
+def test_obsolete_joint_analysis_fields_and_sidecar_do_not_affect_old_project(tmp_path, monkeypatch):
+    path = tmp_path / "bone.stl"
+    path.write_bytes(b"existing bone")
+    record = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    project = tmp_path / "project.json"
+    project.write_text(json.dumps({
+        "workflow": "mandibular_pose_transfer", "outputs": dict.fromkeys(BONE_KEYS, record),
+        "transforms": {"T_DELTA": {"matrix": np.eye(4).tolist()}},
+        "joint_space_analysis": {"unsupported_experimental_schema": 999},
+    }), encoding="utf-8")
+    sidecar = tmp_path / "joint_space_analysis.json"
+    sidecar.write_text("obsolete or malformed experimental output", encoding="utf-8")
+    before = {p: p.read_bytes() for p in (path, project, sidecar)}
+    monkeypatch.setattr(scene_data, "load_mesh", lambda _path: (o3d.geometry.TriangleMesh.create_box(), None))
+    scene = scene_data.load_scene(project, keys=BONE_KEYS)
+    assert set(m.key for m in scene.models) == set(BONE_KEYS)
+    assert not scene.warnings
+    assert {p: p.read_bytes() for p in before} == before
+
+
 def test_scene_load_only_common_frame_models_and_relocated_outputs(tmp_path, monkeypatch):
     folder = tmp_path / "meshes"
     folder.mkdir()
@@ -62,6 +82,38 @@ def test_legacy_project_derives_second_dentition_with_delta(tmp_path, monkeypatc
     assert set(models) == {"ct_dentition_t0", "ct_dentition_t1"}
     np.testing.assert_allclose(models["ct_dentition_t1"].mesh.get_min_bound(), [5, -2, 3])
     np.testing.assert_allclose(models["ct_dentition_t0"].mesh.get_min_bound(), [0, 0, 0])
+
+
+def test_optional_maxilla_has_only_one_fixed_output_and_can_be_deferred(tmp_path, monkeypatch):
+    folder = tmp_path / "meshes"
+    folder.mkdir()
+    path = folder / "ct_maxilla_T0.stl"
+    path.write_bytes(b"fixed maxilla")
+    record = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    mandible_path = folder / "ct_mandible_T0.stl"
+    mandible_path.write_bytes(b"fixed mandible")
+    mandible_record = {
+        "path": str(mandible_path),
+        "sha256": hashlib.sha256(mandible_path.read_bytes()).hexdigest(),
+    }
+    project = tmp_path / "project.json"
+    project.write_text(json.dumps({
+        "workflow": "mandibular_pose_transfer",
+        "outputs": {"ct_mandible_t0": mandible_record, "ct_maxilla_t0": record},
+        "transforms": {"T_DELTA": {"matrix": np.eye(4).tolist()}},
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        scene_data,
+        "load_mesh",
+        lambda _path: (o3d.geometry.TriangleMesh.create_box(), None),
+    )
+
+    initial = scene_data.load_scene(project, keys={"ct_mandible_t0"})
+    assert [model.key for model in initial.models] == ["ct_mandible_t0"]
+    assert initial.deferred_keys == {"ct_maxilla_t0"}
+    loaded = scene_data.load_scene(project, keys={"ct_maxilla_t0"})
+    assert [model.key for model in loaded.models] == ["ct_maxilla_t0"]
+    assert "ct_maxilla_t1" not in {model.key for model in loaded.models}
 
 
 def test_old_result_warns_when_ct_input_relative_coordinates_were_lost(tmp_path, monkeypatch):

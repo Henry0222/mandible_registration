@@ -7,7 +7,7 @@ import shutil
 import zipfile
 
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 QT_DISTRIBUTIONS = (
     "PySide6",
     "PySide6-Essentials",
@@ -48,13 +48,27 @@ def collect_qt_licenses(output: Path) -> int:
     return copied
 
 
+def validate_application_assets(project: Path, release: Path) -> None:
+    """Reject stale/missing assets from an older installed application wheel."""
+    source_assets = project / "src" / "mandible_registration" / "assets"
+    bundled_assets = release / "_internal" / "mandible_registration" / "assets"
+    for source in source_assets.iterdir():
+        if not source.is_file() or source.suffix.lower() not in {".svg", ".ico"}:
+            continue
+        bundled = bundled_assets / source.name
+        if not bundled.is_file() or sha256_file(source) != sha256_file(bundled):
+            raise RuntimeError(f"发行包资源缺失或与当前源码不一致：{source.name}")
+
+
 def main() -> int:
     project = Path(__file__).resolve().parents[1]
     dist = project / "dist"
     release = dist / f"MandibleRegistration-v{VERSION}"
     executable = release / f"MandibleRegistration-v{VERSION}.exe"
     executable.resolve(strict=True)
+    validate_application_assets(project, release)
 
+    shutil.copy2(project / "LICENSE", release / "LICENSE")
     shutil.copy2(project / "PORTABLE_README.txt", release / "使用说明.txt")
     shutil.copy2(
         project / "THIRD_PARTY_NOTICES.md",

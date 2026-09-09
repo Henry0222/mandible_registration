@@ -9,4 +9,4 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

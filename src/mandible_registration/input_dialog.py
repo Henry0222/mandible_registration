@@ -19,13 +19,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .models import INPUT_SPECS, StudyInputs
+from .models import INPUT_SPECS, REQUIRED_INPUT_KEYS, StudyInputs
 from .drop_import import StlDropZone, validate_assignments
 from .theme import apply_light_theme
 
 
 class SequentialStlDialog(QFileDialog):
-    """Keep one file browser open while assigning the six ordered STL roles.
+    """Keep one file browser open while assigning required and optional STL roles.
 
     A native QFileDialog closes when a file is accepted. The widget-based
     dialog lets us keep its folder/navigation state and advance the prompt
@@ -96,8 +96,11 @@ class SequentialStlDialog(QFileDialog):
 
     def _show_step(self) -> None:
         spec = INPUT_SPECS[self._step]
-        self.setWindowTitle(f"连续选择 STL — 第 {spec.sequence}/6 项：{spec.title}")
-        self.stage_label.setText(f"{spec.sequence}/6　{spec.title}")
+        suffix = "（可选）" if not spec.required else ""
+        self.setWindowTitle(
+            f"连续选择 STL — 第 {spec.sequence}/{len(INPUT_SPECS)} 项：{spec.title}{suffix}"
+        )
+        self.stage_label.setText(f"{spec.sequence}/{len(INPUT_SPECS)}　{spec.title}{suffix}")
         self.setLabelText(
             QFileDialog.DialogLabel.Accept,
             "确认并返回" if self._step == len(INPUT_SPECS) - 1 else "确认，下一项",
@@ -108,7 +111,8 @@ class SequentialStlDialog(QFileDialog):
             selected = self._paths.get(item.key)
             name = selected.name if selected is not None else "未选择"
             marker = "→" if item.sequence == spec.sequence else "  "
-            lines.append(f"{marker} {item.sequence}. {item.title}：{name}")
+            optional = "（可选）" if not item.required else ""
+            lines.append(f"{marker} {item.sequence}. {item.title}{optional}：{name}")
         self.selection_summary.setText("\n".join(lines))
         current = self._paths.get(spec.key)
         if current is not None:
@@ -167,5 +171,5 @@ class SequentialStlDialog(QFileDialog):
             QMessageBox.warning(self, "文件校验未通过", str(exc))
             return
         self.paths = paths
-        self.inputs = StudyInputs.from_mapping(paths) if len(paths) == len(INPUT_SPECS) else None
+        self.inputs = StudyInputs.from_mapping(paths) if REQUIRED_INPUT_KEYS <= paths.keys() else None
         QDialog.accept(self)

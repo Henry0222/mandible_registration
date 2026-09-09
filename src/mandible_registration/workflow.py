@@ -184,19 +184,22 @@ def _transform_disagreement(first: np.ndarray, second: np.ndarray) -> dict[str, 
 
 
 def _require_shared_ct_frame(
-    dentition_facts: MeshFacts, mandible_facts: MeshFacts
+    dentition_facts: MeshFacts,
+    bone_facts: MeshFacts,
+    *,
+    bone_name: str = "颌骨",
 ) -> None:
-    report = ct_frame_compatibility(dentition_facts, mandible_facts)
+    report = ct_frame_compatibility(dentition_facts, bone_facts)
     if report["compatible"]:
         return
     dentition_name = Path(dentition_facts.path).name
     raise WorkflowError(
-        "全牙列与颌骨不像处于同一原始 CT 坐标系"
+        f"全牙列与{bone_name}不像处于同一原始 CT 坐标系"
         f"（包围盒交叠 {100 * float(report['aabb_overlap_fraction']):.1f}%，"
         f"中心相距 {float(report['center_distance_mm']):.1f} mm）。"
         f"当前全牙列为 {dentition_name}；它可能是已单独配准到口扫的中间文件。"
-        "请改选与颌骨同时从 CT 软件导出、未经单独移动的全牙列 STL。"
-        "已停止配准，以免把错误矩阵传给颌骨"
+        f"请改选与{bone_name}同时从 CT 软件导出、未经单独移动的全牙列 STL。"
+        f"已停止配准，以免把错误矩阵传给{bone_name}"
     )
 
 
@@ -373,7 +376,7 @@ def _run_study_in_directory(
     progress: ProgressCallback | None = None,
     stage_changed: StageCallback | None = None,
 ) -> StudyOutcome:
-    """Run the fixed six-STL mandibular pose-transfer workflow.
+    """Run the fixed six-STL workflow with an optional CT maxilla/skull mesh.
 
     Every registration maps the moving/source mesh into the fixed/target mesh.
     The combined CT dentition remains intact. Optional user-selected priority
@@ -392,7 +395,7 @@ def _run_study_in_directory(
     )
 
     _notify(progress, 0.0, f"已建立运行目录：{run_directory.name}")
-    _notify(progress, 0.005, "读取并检查六个 STL")
+    _notify(progress, 0.005, "读取并检查六个配准 STL 与可选上颌骨 STL")
     loaded: dict[str, tuple[o3d.geometry.TriangleMesh, MeshFacts]] = {}
     values = inputs.as_mapping()
     for index, (key, path) in enumerate(values.items(), start=1):
@@ -403,10 +406,17 @@ def _run_study_in_directory(
     baseline_upper, baseline_upper_facts = loaded["baseline_upper"]
     ct_dentition, ct_dentition_facts = loaded["ct_dentition"]
     ct_mandible, ct_mandible_facts = loaded["ct_mandible"]
+    ct_maxilla_bundle = loaded.get("ct_maxilla")
     followup_upper, followup_upper_facts = loaded["followup_upper"]
     followup_lower, followup_lower_facts = loaded["followup_lower"]
 
     _require_shared_ct_frame(ct_dentition_facts, ct_mandible_facts)
+    if ct_maxilla_bundle is not None:
+        _require_shared_ct_frame(
+            ct_dentition_facts,
+            ct_maxilla_bundle[1],
+            bone_name="上颌骨",
+        )
 
     from .registration_selection import load_priority_mask
     target_priority, target_priority_profile = load_priority_mask(
@@ -451,8 +461,15 @@ def _run_study_in_directory(
 
     ct_dentition_t0 = transformed_mesh(ct_dentition, stage1.transformation)
     ct_mandible_t0 = transformed_mesh(ct_mandible, stage1.transformation)
+    ct_maxilla_t0 = (
+        transformed_mesh(ct_maxilla_bundle[0], stage1.transformation)
+        if ct_maxilla_bundle is not None else None
+    )
+    ready_t0 = ["ct_dentition_t0", "ct_mandible_t0"]
+    if ct_maxilla_t0 is not None:
+        ready_t0.append("ct_maxilla_t0")
     _notify_stage(stage_changed, run_directory, "T_CT", result=stage1_result,
-                  review_path=review_ct, ready_outputs=("ct_dentition_t0", "ct_mandible_t0"))
+                  review_path=review_ct, ready_outputs=tuple(ready_t0))
 
     _notify_stage(stage_changed, run_directory, "T_UPPER")
     stage2_result = register_meshes(
@@ -532,6 +549,10 @@ def _run_study_in_directory(
         "review_T_UPPER": review_upper,
         "review_T_DELTA": review_delta,
     }
+    if ct_maxilla_t0 is not None:
+        output_files["ct_maxilla_t0"] = write_mesh(
+            mesh_directory / "ct_maxilla_T0.stl", ct_maxilla_t0
+        )
 
     matrix_payloads = {
         "T_CT": _matrix_payload("T_CT", t_ct, "CT 原始坐标 → 下颌口扫.1 坐标"),
@@ -540,12 +561,16 @@ def _run_study_in_directory(
         "T_MANDIBLE_T0": _matrix_payload("T_MANDIBLE_T0", t_mandible_t0, "CT 原始颌骨 → 颌骨.1"),
         "T_MANDIBLE_T1": _matrix_payload("T_MANDIBLE_T1", t_mandible_t1, "CT 原始颌骨 → 颌骨.2"),
     }
+    if ct_maxilla_t0 is not None:
+        matrix_payloads["T_MAXILLA_T0"] = _matrix_payload(
+            "T_MAXILLA_T0", t_ct, "CT 原始上颌骨 → 上颌骨.1；不生成时点 2 副本"
+        )
     for name, payload in matrix_payloads.items():
         write_json(matrix_directory / f"{name}.json", payload)
 
     stages = (stage1, stage2, stage3)
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "workflow": "mandibular_pose_transfer",
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "registration_core_version": registration_core_version,
@@ -553,6 +578,7 @@ def _run_study_in_directory(
         "coordinate_reference": "上颌口扫.1 坐标系；下颌位姿由各组数字咬合记录给出",
         "assumptions": [
             "CT 牙列与 CT 下颌骨共享同一原始坐标系",
+            "可选上颌骨与 CT 牙列、下颌骨共享同一原始坐标系，且只应用 T_CT 定位到时点 1",
             "两次之间上颌牙冠几何未改变",
             "两次之间下颌牙相对下颌骨没有发生牙移动",
             "所有 STL 坐标单位为毫米，全部变换均为刚性变换",

@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from mandible_registration.input_dialog import SequentialStlDialog
-from mandible_registration.models import INPUT_SPECS
+from mandible_registration.models import INPUT_SPECS, REQUIRED_INPUT_SPECS
 
 
 @pytest.fixture(scope="module")
@@ -33,14 +33,14 @@ def app():
 @pytest.fixture
 def files(tmp_path):
     result = []
-    for name in ("z", "b", "d", "a", "f", "c"):
+    for name in ("z", "b", "d", "a", "g", "f", "c"):
         path = tmp_path / f"{name}.stl"
         path.write_bytes(b"selection test")
         result.append(path)
     return result
 
 
-def test_six_accept_clicks_keep_one_window_and_preserve_role_order(app, files, monkeypatch):
+def test_seven_accept_clicks_keep_one_window_and_preserve_role_order(app, files, monkeypatch):
     warnings = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[2]))
     dialog = SequentialStlDialog(directory=str(files[0].parent))
@@ -62,7 +62,7 @@ def test_six_accept_clicks_keep_one_window_and_preserve_role_order(app, files, m
             QTest.mouseClick(open_button, Qt.MouseButton.LeftButton)
             app.processEvents()
             assert not warnings
-            if index < 5:
+            if index < len(files) - 1:
                 assert dialog.isVisible()
                 assert not accepted
                 assert dialog._step == index + 1
@@ -139,7 +139,7 @@ def test_selecting_from_file_list_advances_in_the_same_window(app, files, monkey
                 QTest.mouseClick(button, Qt.MouseButton.LeftButton)
             app.processEvents()
             assert not warnings
-            assert dialog.isVisible() == (step < 5)
+            assert dialog.isVisible() == (step < len(files) - 1)
         assert list(dialog.inputs.as_mapping().values()) == files
     finally:
         dialog.close()
@@ -197,7 +197,7 @@ def test_skip_missing_roles_and_save_partial_selection(app, files):
         QTest.mouseClick(dialog.skip_button, Qt.MouseButton.LeftButton)
         assert dialog._step == 1
         dialog.accept_path(files[1])
-        for _ in range(4):
+        for _ in range(len(INPUT_SPECS) - 2):
             QTest.mouseClick(dialog.skip_button, Qt.MouseButton.LeftButton)
         assert dialog.result() == QFileDialog.DialogCode.Accepted
         assert dialog.paths == {"baseline_upper": files[1]}
@@ -226,25 +226,32 @@ def test_partial_save_and_cancel_preserve_initial_mapping(app, files):
             dialog.deleteLater()
 
 
-def test_registration_requires_all_six_and_clearing_invalidates_results(app, files, monkeypatch):
+def test_registration_requires_six_core_inputs_but_not_optional_maxilla(app, files, monkeypatch):
     from mandible_registration.gui import MainWindow
 
     warnings = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[2]))
     window = MainWindow()
     try:
-        for count in range(7):
-            window._apply_input_paths({spec.key: path for spec, path in zip(INPUT_SPECS[:count], files)})
-            assert window.run_button.isEnabled() == (count == 6)
-            if count < 6:
+        required_paths = {
+            spec.key: path for spec, path in zip(REQUIRED_INPUT_SPECS, files)
+        }
+        for count in range(len(REQUIRED_INPUT_SPECS) + 1):
+            window._apply_input_paths(dict(list(required_paths.items())[:count]))
+            assert window.run_button.isEnabled() == (count == len(REQUIRED_INPUT_SPECS))
+            if count < len(REQUIRED_INPUT_SPECS):
                 window._start()  # Guard is also enforced when called programmatically.
                 assert window._thread is None
-        assert len(warnings) == 6
+        assert len(warnings) == len(REQUIRED_INPUT_SPECS)
+        assert "上颌骨可选" in window.input_count.text()
+        window._apply_input_paths({**required_paths, "ct_maxilla": files[-1]})
+        assert window.run_button.isEnabled()
+        assert "上颌骨已导入" in window.input_count.text()
         window._project_path = Path("project.json")
         window._review_paths = {"T_CT": Path("results.json")}
         window.flow.set_results({"T_CT": "success"}, window._review_paths, ["ct_mandible_t0"])
         window._clear_input("ct_dentition")
-        assert len(window._paths) == 5
+        assert len(window._paths) == len(REQUIRED_INPUT_SPECS)
         assert not window.run_button.isEnabled()
         assert not window.view_button.isEnabled()
         assert not window.flow.outputs and not window.flow.review_paths

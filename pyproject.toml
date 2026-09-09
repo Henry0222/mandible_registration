@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mandible-registration"
-version = "1.0.0"
-description = "Six-mesh rigid workflow for mandibular pose transfer and condyle comparison"
+version = "1.1.0"
+description = "Mandibular pose transfer with six required meshes and an optional CT maxilla"
 readme = "README.md"
 license = "BSD-3-Clause"
 authors = [{ name = "Henry0222" }]

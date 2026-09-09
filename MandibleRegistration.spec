@@ -2,25 +2,28 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 open3d_datas, open3d_binaries, open3d_hiddenimports = collect_all("open3d")
-application_datas = collect_data_files(
-    "mandible_registration", includes=["assets/*.svg"]
-)
-application_datas.append(
-    (
-        str(Path("src/mandible_registration/assets/app_icon.ico").resolve()),
-        "mandible_registration/assets",
-    )
-)
-application_hiddenimports = collect_submodules("mandible_registration")
+source_package = Path(SPECPATH) / "src" / "mandible_registration"
+# The build environment can contain an older installed wheel. Bundle assets
+# and application modules from this checkout, matching Analysis.pathex.
+application_datas = [
+    (str(asset), "mandible_registration/assets")
+    for asset in sorted((source_package / "assets").iterdir())
+    if asset.is_file() and asset.suffix.lower() in {".svg", ".ico"}
+]
+application_hiddenimports = [
+    f"mandible_registration.{module.stem}"
+    for module in sorted(source_package.glob("*.py"))
+    if module.stem != "__init__"
+]
 registration_hiddenimports = collect_submodules("auto_alignment")
 
 analysis = Analysis(
     ["scripts/gui_entry.py"],
-    pathex=["src"],
+    pathex=[str(source_package.parent)],
     binaries=open3d_binaries,
     datas=open3d_datas + application_datas,
     hiddenimports=(
@@ -63,7 +66,7 @@ exe = EXE(
     analysis.scripts,
     [],
     exclude_binaries=True,
-    name="MandibleRegistration-v1.0.0",
+    name="MandibleRegistration-v1.1.0",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -84,5 +87,5 @@ collection = COLLECT(
     analysis.datas,
     strip=False,
     upx=False,
-    name="MandibleRegistration-v1.0.0",
+    name="MandibleRegistration-v1.1.0",
 )

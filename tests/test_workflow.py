@@ -111,11 +111,17 @@ def test_workflow_composes_and_audits_outputs(tmp_path: Path, monkeypatch) -> No
     assert np.allclose(outcome.t_mandible_t1, outcome.t_delta @ outcome.t_ct)
     assert (outcome.run_directory / "stages" / "01_T_CT.json").is_file()
     project = json.loads((outcome.run_directory / "project.json").read_text("utf-8"))
-    assert project["schema_version"] == 2
+    assert project["schema_version"] == 3
     assert project["inputs"]["ct_mandible"]["mesh_facts"]["triangles"] == 12
     assert len(project["outputs"]["ct_mandible_t1"]["sha256"]) == 64
     assert outcome.output_files["ct_dentition_t1"].is_file()
     assert len(project["outputs"]["ct_dentition_t1"]["sha256"]) == 64
+    assert outcome.output_files["ct_maxilla_t0"].is_file()
+    assert "ct_maxilla_t1" not in outcome.output_files
+    np.testing.assert_allclose(
+        project["transforms"]["T_MAXILLA_T0"]["matrix"],
+        project["transforms"]["T_CT"]["matrix"],
+    )
     assert project["condyle_selection"] == selection
     assert condyles.project_analysis(outcome.output_files["project"])["regions"]["left"]["distance_mm"] == pytest.approx(3)
 
@@ -154,6 +160,26 @@ def test_optional_priority_faces_apply_only_to_ct_stage(tmp_path, monkeypatch):
                for kwargs in calls[2:])
     project = json.loads(outcome.output_files["project"].read_text("utf-8"))
     assert project["registration_selections"] == profiles
+
+
+def test_workflow_without_optional_maxilla_keeps_original_six_mesh_behavior(tmp_path, monkeypatch):
+    values = _make_inputs(tmp_path).as_mapping()
+    values.pop("ct_maxilla")
+    inputs = StudyInputs.from_mapping(values)
+    transforms = iter((np.eye(4), np.eye(4), np.eye(4), np.eye(4)))
+    monkeypatch.setattr(workflow, "_ct_attempt_is_strong", lambda result: result.succeeded)
+    monkeypatch.setattr(
+        workflow,
+        "register_meshes",
+        lambda *_args, **_kwargs: _result(next(transforms)),
+    )
+
+    outcome = workflow.run_study(inputs, tmp_path / "outputs")
+    project = json.loads(outcome.output_files["project"].read_text("utf-8"))
+
+    assert "ct_maxilla" not in project["inputs"]
+    assert "ct_maxilla_t0" not in project["outputs"]
+    assert "T_MAXILLA_T0" not in project["transforms"]
 
 
 def test_failed_stage_leaves_a_diagnostic_run(tmp_path: Path, monkeypatch) -> None:

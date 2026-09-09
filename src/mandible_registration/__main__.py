@@ -27,7 +27,7 @@ def ensure_standard_streams() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="下颌位姿配准与 CT 下颌骨变换传递")
-    parser.add_argument("--dataset-dir", type=Path, help="按约定中文文件名读取六个测试 STL")
+    parser.add_argument("--dataset-dir", type=Path, help="按约定中文文件名读取六个必需 STL，并自动读取可选上颌骨 STL")
     parser.add_argument("--output-dir", type=Path, help="结果根目录")
     parser.add_argument("--view-mesh", type=Path, help="单独查看一个 STL")
     parser.add_argument("--view-stage", type=Path, help="使用通用项目查看器打开阶段 results.json")

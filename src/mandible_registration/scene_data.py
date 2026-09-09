@@ -51,6 +51,7 @@ def load_mesh(path):
 MODEL_SPECS = (
     ("ct_mandible_t0", "颌骨.1（T0）", (0.22, 0.58, 0.90)),
     ("ct_mandible_t1", "颌骨.2（T1）", (1.00, 0.58, 0.20)),
+    ("ct_maxilla_t0", "上颌骨.1（固定参考）", (0.86, 0.79, 0.62)),
     ("baseline_lower", "下颌口扫.1", (0.20, 0.82, 0.48)),
     ("baseline_upper", "上颌口扫.1（固定参考）", (0.86, 0.88, 0.94)),
     ("ct_dentition_t0", "全牙列.1（按下颌定位）", (0.70, 0.65, 0.86)),
@@ -62,6 +63,7 @@ MODEL_SPECS = (
 BONE_KEYS = ("ct_mandible_t0", "ct_mandible_t1")
 COMPARISON_KEYS = (
     *BONE_KEYS,
+    "ct_maxilla_t0",
     "baseline_lower",
     "baseline_upper",
     "followup_upper_in_t0",
@@ -70,6 +72,8 @@ COMPARISON_KEYS = (
     "ct_dentition_t1",
 )
 CT_INSPECTION_KEYS = ("ct_dentition_t0", "baseline_lower")
+JOINT_VIEW_KEYS = (*BONE_KEYS, "ct_maxilla_t0")
+OPTIONAL_MODEL_KEYS = frozenset({"ct_maxilla_t0"})
 
 
 @dataclass
@@ -113,6 +117,19 @@ def load_scene(project_path: str | Path, *, keys=None, array_meshes: bool = Fals
                 f"中心相距 {float(frame_report['center_distance_mm']):.1f} mm）；"
                 "牙列与颌骨相互分离，因此本结果不能用于髁突变化判断，请换用未经单独移动的全牙列重新配准。"
             )
+    maxilla_facts = input_records.get("ct_maxilla", {}).get("mesh_facts")
+    if isinstance(dentition_facts, dict) and isinstance(maxilla_facts, dict):
+        try:
+            frame_report = ct_frame_compatibility(dentition_facts, maxilla_facts)
+        except (KeyError, TypeError, ValueError):
+            frame_report = None
+        if frame_report is not None and not frame_report["compatible"]:
+            scene.warnings.append(
+                "此结果的原始全牙列与上颌骨不在同一 CT 坐标系"
+                f"（包围盒交叠 {100 * float(frame_report['aabb_overlap_fraction']):.1f}%，"
+                f"中心相距 {float(frame_report['center_distance_mm']):.1f} mm）；"
+                "上颌骨.1不能作为关节窝参考，请换用与全牙列同时导出的原始 STL。"
+            )
     try:
         scene.delta = validated_rigid_transform(data["transforms"]["T_DELTA"]["matrix"], tolerance=1e-4)
     except (KeyError, ValueError, TypeError) as exc:
@@ -127,7 +144,7 @@ def load_scene(project_path: str | Path, *, keys=None, array_meshes: bool = Fals
                 record = fallback
                 legacy_dentition_t1 = True
         if not isinstance(record, dict) or not record.get("path"):
-            if keys is None or key in keys:
+            if key not in OPTIONAL_MODEL_KEYS and (keys is None or key in keys):
                 scene.warnings.append(f"未收录：{title}")
             continue
         if keys is not None and key not in keys:

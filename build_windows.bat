@@ -12,10 +12,10 @@ if not exist "%BUILD_PYTHON%" (
 "%BUILD_PYTHON%" -m pytest
 if errorlevel 1 exit /b 1
 
-"%BUILD_PYTHON%" -m PyInstaller --noconfirm --clean --workpath "build\MandibleRegistration-v1.0.0" MandibleRegistration.spec
+"%BUILD_PYTHON%" -m PyInstaller --noconfirm --clean --workpath "build\MandibleRegistration-v1.1.0" MandibleRegistration.spec
 if errorlevel 1 exit /b 1
 
 "%BUILD_PYTHON%" "scripts\package_windows_release.py"
 if errorlevel 1 exit /b 1
 
-echo Build complete: dist\MandibleRegistration-v1.0.0-win64.zip
+echo Build complete: dist\MandibleRegistration-v1.1.0-win64.zip

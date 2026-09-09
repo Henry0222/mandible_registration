@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 from .drop_import import AssignStlDialog, DirectoryDropEdit, validate_assignments
 from .flow_diagram import WorkflowDiagram
 from .input_dialog import SequentialStlDialog
-from .models import INPUT_SPECS, StudyInputs
+from .models import INPUT_SPECS, REQUIRED_INPUT_KEYS, StudyInputs
 from .registration_profiles import (
     ROLE_LABELS,
     condyle_profile_path,
@@ -110,7 +110,7 @@ class MainWindow(QMainWindow):
         self.input_count = QLabel()
         toolbar.addWidget(self.input_count)
         self.sequence_button = QPushButton("导入 / 补充 STL")
-        self.sequence_button.clicked.connect(self._choose_six_inputs)
+        self.sequence_button.clicked.connect(self._choose_inputs)
         toolbar.addWidget(self.sequence_button)
         layout.addLayout(toolbar)
 
@@ -172,8 +172,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_sequence(self):
         idle = self._thread is None and self._selection_process is None
-        all_ready = len(self._paths) == len(INPUT_SPECS)
-        self.input_count.setText(f"已导入 {len(self._paths)} / 6")
+        ready_count = len(REQUIRED_INPUT_KEYS & self._paths.keys())
+        all_ready = REQUIRED_INPUT_KEYS <= self._paths.keys()
+        optional_text = "上颌骨已导入" if "ct_maxilla" in self._paths else "上颌骨可选"
+        self.input_count.setText(f"配准输入 {ready_count} / {len(REQUIRED_INPUT_KEYS)} · {optional_text}")
         self.run_button.setEnabled(all_ready and idle)
         self.sequence_button.setEnabled(idle)
         self.flow.set_import_enabled(idle)
@@ -183,7 +185,9 @@ class MainWindow(QMainWindow):
         self.view_button.setEnabled(self._project_path is not None)
         self.open_button.setEnabled(self._last_run_directory is not None)
         if not all_ready and idle:
-            self.progress_bar.setFormat(f"已导入 {len(self._paths)}/6 项，补齐后可开始配准")
+            self.progress_bar.setFormat(
+                f"配准输入 {ready_count}/{len(REQUIRED_INPUT_KEYS)}，补齐后可开始配准"
+            )
 
     def _choose_input_key(self, key):
         self._choose_input(next(index for index, spec in enumerate(INPUT_SPECS) if spec.key == key))
@@ -216,7 +220,10 @@ class MainWindow(QMainWindow):
         self.flow.set_selection_statuses(saved_selection_keys(paths))
         self.flow.set_results()
         self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("六项已齐，可以开始配准")
+        self.progress_bar.setFormat(
+            "六项配准输入已齐；上颌骨已导入" if "ct_maxilla" in paths
+            else "六项配准输入已齐；上颌骨可稍后补充"
+        )
         self._refresh_sequence()
 
     def _drop_flow_inputs(self, key, paths):
@@ -236,7 +243,7 @@ class MainWindow(QMainWindow):
         finally:
             dialog.deleteLater()
 
-    def _choose_six_inputs(self):
+    def _choose_inputs(self):
         if self._thread is not None:
             return
         initial = str(next(reversed(self._paths.values())).parent) if self._paths else ""
@@ -246,6 +253,10 @@ class MainWindow(QMainWindow):
                 self._apply_input_paths(dialog.paths)
         finally:
             dialog.deleteLater()
+
+    # Compatibility for older callers and UI tests.
+    def _choose_six_inputs(self):
+        self._choose_inputs()
 
     def _choose_output_directory(self):
         directory = QFileDialog.getExistingDirectory(self, "选择结果根目录", self.output_edit.text().strip())
@@ -384,7 +395,9 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
                 try:
                     from .scene_viewer import SceneViewer
-                    window = SceneViewer(self, reusable=True)
+                    # Parentless top-level window: independent taskbar entry,
+                    # focus and minimization, while retaining shared-process cache.
+                    window = SceneViewer(reusable=True)
                     self._measurement_windows[key] = window
                     window.show()
                     window.vtk_widget.Initialize()
@@ -525,19 +538,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "选区窗口仍在运行", "请先保存并关闭当前选区窗口。")
             event.ignore()
             return
-        for window in self._measurement_windows.values():
-            if window._thread is not None:
-                QMessageBox.information(self, "查看器正在处理", "请等待模型读取结束。")
-                event.ignore()
-                return
-        if any(window.measurements for window in self._measurement_windows.values()):
-            if QMessageBox.question(self, "关闭软件", "手动测量尚在内存中；如需保留请先导出测量记录。确认关闭软件？") != QMessageBox.StandardButton.Yes:
-                event.ignore()
-                return
         if self._thread is not None and self._thread.isRunning():
             QMessageBox.information(self, "配准仍在运行", "请等待运行完成后再关闭窗口。")
             event.ignore()
             return
+        for window in self._measurement_windows.values():
+            window._reusable = False
+            if not window.isVisible():
+                if window.has_section_measurements() or window._thread is not None:
+                    window.show()  # Keep unexported work alive independently.
+                else:
+                    window.close()
         super().closeEvent(event)
 
 

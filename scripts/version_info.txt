@@ -16,11 +16,11 @@ VSVersionInfo(
         [
           StringStruct("CompanyName", "Henry Van"),
           StringStruct("FileDescription", "下颌位姿配准"),
-          StringStruct("FileVersion", "1.0.0"),
+          StringStruct("FileVersion", "1.1.0"),
           StringStruct("InternalName", "MandibleRegistration"),
-          StringStruct("OriginalFilename", "MandibleRegistration-v1.0.0.exe"),
+          StringStruct("OriginalFilename", "MandibleRegistration-v1.1.0.exe"),
           StringStruct("ProductName", "下颌位姿配准"),
-          StringStruct("ProductVersion", "1.0.0"),
+          StringStruct("ProductVersion", "1.1.0"),
         ],
       )
     ]),

@@ -14,6 +14,32 @@ from .registration_profiles import condyle_profile_path
 REGIONS = {"left": "左侧髁突", "right": "右侧髁突"}
 
 
+def displacement_description(side, vector):
+    """Explicit user convention in common world XYZ; no inferred anatomy."""
+    x, y, z = np.asarray(vector, dtype=float)
+    values = [(x if side == "left" else -x, "外移", "内移"),
+              (-y, "前移", "后移"), (z, "上移", "下移")]
+    return " · ".join(f"{positive if value > 0 else negative} {abs(value):.3f} mm"
+                      for value, positive, negative in values if abs(value) >= .0005) or "无明显位移"
+
+
+def rotation_in_minus_x_view(matrix):
+    """Closest YZ-plane rotation, clockwise as seen from -X (screen up +Z).
+
+    Equivalent to the quaternion's signed X twist. The 3D principal angle is a
+    separate quantity: non-X rotations must not be reported as jaw opening.
+    """
+    r = validated_rigid_transform(matrix, tolerance=1e-4)[:3, :3]
+    sine, cosine = r[2, 1] - r[1, 2], r[1, 1] + r[2, 2]
+    if np.hypot(sine, cosine) < 1e-10:
+        return {"signed_degrees": None, "label": "顺逆旋方向无法判定"}
+    angle = float(np.degrees(np.arctan2(sine, cosine)))
+    if abs(abs(angle) - 180) < 1e-6:
+        return {"signed_degrees": angle, "label": "顺逆旋方向不定（180°）"}
+    return {"signed_degrees": angle,
+            "label": "无明显顺逆旋" if abs(angle) < .005 else "下颌骨顺旋" if angle > 0 else "下颌骨逆旋"}
+
+
 def profile_path(mesh_path):
     return condyle_profile_path(mesh_path)
 
@@ -94,6 +120,7 @@ def analyze_motion(profile, t0, t1):
                         "direction_unit_xyz": direction.tolist() if direction is not None else None,
                         "direction_angles_to_positive_xyz_deg": np.degrees(np.arccos(np.clip(direction, -1, 1))).tolist() if direction is not None else None}
     return {"regions": regions, "rigid_rotation_degrees": rotation_degrees(delta),
+            "rotation_minus_x_view": rotation_in_minus_x_view(delta),
             "coordinate_reference": "上颌口扫.1 坐标系 XYZ，不代表解剖方向",
             "rotation_definition": "整个颌骨的刚体总旋转角（0–180°），不是单个髁突独立旋转角",
             "selection": profile}
