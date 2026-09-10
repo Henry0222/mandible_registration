@@ -133,18 +133,18 @@ def test_short_names_are_matched_when_batch_importing(app, tmp_path):
     dialog.deleteLater()
 
 
-def test_drop_six_in_same_dialog_and_cancel_does_not_commit(app, tmp_path):
+def test_drop_all_inputs_in_same_dialog_and_cancel_does_not_commit(app, tmp_path):
     dialog = SequentialStlDialog(directory=str(tmp_path))
     dialog.show()
     app.processEvents()
     files = []
-    for index in range(6):
+    for index in range(len(INPUT_SPECS)):
         path = tmp_path / f"{index}.stl"
         path.write_bytes(b"test")
         files.append(path)
         assert send_drop(dialog.drop_zone, mime_for([path]), QPoint(10, 10)) == (True, True)
         app.processEvents()
-        assert dialog.isVisible() == (index < 5)
+        assert dialog.isVisible() == (index < len(INPUT_SPECS) - 1)
     assert list(dialog.inputs.as_mapping().values()) == files
     dialog.deleteLater()
     dialog = SequentialStlDialog(directory=str(tmp_path))

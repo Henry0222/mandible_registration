@@ -1,6 +1,6 @@
 # 第三方软件声明
 
-下颌位姿配准 v1.0.0 的 Windows 发行包包含以下主要第三方组件：
+下颌位姿配准 v1.1.0 的 Windows 发行包包含以下主要第三方组件：
 
 - General Model Registration 2.0.0 — BSD License
 - NumPy — BSD 3-Clause License

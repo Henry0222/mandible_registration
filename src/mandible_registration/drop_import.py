@@ -156,7 +156,8 @@ class AssignStlDialog(QDialog):
             if selected in choices:
                 combo.setCurrentIndex(choices.index(selected) + 1)
             self.combos[spec.key] = combo
-            form.addRow(f"{spec.sequence}. {spec.title}", combo)
+            suffix = "（可选）" if not spec.required else ""
+            form.addRow(f"{spec.sequence}. {spec.title}{suffix}", combo)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)

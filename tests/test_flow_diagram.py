@@ -105,7 +105,7 @@ def test_svg_states_and_single_connected_workflow(app):
     flow = WorkflowDiagram()
     original = flow.asset_path.read_bytes()
     try:
-        assert len([node for node in flow.nodes if node.is_input]) == 6
+        assert len([node for node in flow.nodes if node.is_input]) == 7
         assert len({node.key for node in flow.nodes}) == len(flow.nodes)
         flow.set_inputs({"baseline_lower": Path("lower.stl")})
         flow.set_results({"T_CT": "success", "T_UPPER": "warning", "T_DELTA": "failed"}, {"T_CT": Path("results.json")})
@@ -115,6 +115,7 @@ def test_svg_states_and_single_connected_workflow(app):
         assert elements["label-baseline_lower"].get("fill") == "#15191f"
         assert elements["label-followup_lower"].get("opacity") == "0.55"
         assert elements["missing-followup_lower"].get("opacity") == "1"
+        assert elements["missing-ct_maxilla"].get("opacity") == "1"
         for key, status in flow.stage_states.items():
             assert elements[f"stage-{key}"].get("stroke") == STAGE_COLORS[status]
         assert flow.asset_path.read_bytes() == original  # runtime state must not overwrite editor source

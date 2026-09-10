@@ -60,7 +60,10 @@ class WorkflowDiagram(QWidget):
         self.stage_tooltips: dict[str, str] = {}
         self.review_paths: dict[str, Path] = {}
         self.selection_statuses: set[str] = set()
-        self.asset_path = Path(asset_path) if asset_path else Path(__file__).with_name("assets") / "workflow.editable.svg"
+        self.asset_path = (
+            Path(asset_path) if asset_path
+            else Path(__file__).with_name("assets") / "workflow.maxilla.editable.svg"
+        )
         ET.register_namespace("", "http://www.w3.org/2000/svg")
         self._document = ET.parse(self.asset_path).getroot()
         self._elements = {element.get("id"): element for element in self._document.iter() if element.get("id")}

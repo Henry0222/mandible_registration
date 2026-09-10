@@ -6,21 +6,21 @@ from pathlib import Path
 import sys
 
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QPointF, QSize, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QSize, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPushButton, QScrollArea, QSlider, QSplitter, QVBoxLayout, QWidget, QColorDialog,
+    QApplication, QCheckBox, QFileDialog, QGroupBox,
+    QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter, QVBoxLayout, QWidget, QColorDialog,
 )
 from vtkmodules.vtkCommonCore import vtkPoints
-from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData, vtkStaticCellLocator
+from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
 from vtkmodules.vtkFiltersSources import vtkLineSource, vtkRegularPolygonSource
-from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
+from vtkmodules.vtkInteractionStyle import vtkInteractorStyleUser
 from vtkmodules.vtkInteractionWidgets import vtkOrientationMarkerWidget
 from vtkmodules.vtkRenderingAnnotation import vtkAxesActor
 from vtkmodules.vtkRenderingCore import (
-    vtkActor, vtkBillboardTextActor3D, vtkCellPicker, vtkFollower,
+    vtkActor, vtkBillboardTextActor3D, vtkFollower,
     vtkPolyDataMapper, vtkRenderer, vtkRenderWindow,
 )
 from vtkmodules.vtkRenderingUI import vtkGenericRenderWindowInteractor
@@ -30,10 +30,13 @@ from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
 
 from .scene_data import (
-    BONE_KEYS, COMPARISON_KEYS, CT_INSPECTION_KEYS, MODEL_SPECS, SceneData, SceneModel,
-    bone_pick_keys, segment_angle_degrees, length_mm, load_scene, point_array,
+    BONE_KEYS, COMPARISON_KEYS, CT_INSPECTION_KEYS, JOINT_VIEW_KEYS, MODEL_SPECS,
+    SceneData, SceneModel,
+    load_scene,
 )
 from .theme import apply_light_theme
+from .view_interaction import ViewGestures
+from .section_geometry import _rotate, unit
 
 
 def color_swatch_icon(rgb, size: int = 14) -> QIcon:
@@ -98,38 +101,6 @@ class OffscreenVtkWidget(QWidget):
         self.window.Finalize()
 
 
-class SurfaceClickFilter(QObject):
-    """Observe Qt clicks without stealing VTK camera gestures or release focus."""
-
-    clicked = Signal(object)
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        self._press = None
-        self._dragged = False
-
-    def eventFilter(self, watched, event):
-        kind = event.type()
-        if kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick) and event.button() == Qt.MouseButton.LeftButton:
-            self._press = QPointF(event.position())
-            self._dragged = False
-        elif kind == QEvent.Type.MouseMove and self._press is not None:
-            delta = event.position() - self._press
-            self._dragged |= delta.x() ** 2 + delta.y() ** 2 > 16
-        elif kind == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-            position = QPointF(event.position())
-            if self._press is not None:
-                delta = position - self._press
-                is_click = not self._dragged and delta.x() ** 2 + delta.y() ** 2 <= 16
-                if is_click:
-                    # Let QVTK finish its camera release before querying the surface.
-                    QTimer.singleShot(0, self, lambda: self.clicked.emit(position))
-            self._press = None
-        elif kind in (QEvent.Type.Hide, QEvent.Type.Leave):
-            self._press = None
-        return False
-
-
 class TaskThread(QThread):
     completed = Signal(object)
     failed = Signal(str)
@@ -148,18 +119,16 @@ class TaskThread(QThread):
 class SceneViewer(QMainWindow):
     def __init__(self, parent=None, *, preset: str = "bones", offscreen: bool = False, reusable=False):
         apply_light_theme()
-        super().__init__(parent, Qt.WindowType.Window)
+        super().__init__(None, Qt.WindowType.Window)
         self._reusable = reusable
-        self.setWindowTitle("三维模型查看 · 标记测量")
+        self.setWindowTitle("颌骨对比 · 髁突剖面")
         self.resize(1440, 940)
         self.scene: SceneData | None = None
         self.models: dict[str, SceneModel] = {}
         self.actors: dict[str, vtkActor] = {}
         self.polydata: dict[str, vtkPolyData] = {}
-        self.measurements: list[dict] = []
-        self.pending: list[dict] = []
+        self._rotation_center = None
         self._overlays = []
-        self._next_measurement = 1
         self._thread = None
         self._preset = preset
         self._inspection_active = None
@@ -168,6 +137,17 @@ class SceneViewer(QMainWindow):
         self._task_callback = None
         self.condyle_report = None
         self._condyle_measurements = []
+        self._offscreen = offscreen
+        self.section_views = {}
+        self.section_rois = {}
+        self.section_sources = {}
+        self._section_planes = {}
+        self._sections_enabled = False
+        self._default_layout_applied = False
+        self._section_render_timer = QTimer(self)
+        self._section_render_timer.setSingleShot(True)
+        self._section_render_timer.setInterval(33)
+        self._section_render_timer.timeout.connect(self.render_sections_in_3d)
 
         splitter = QSplitter()
         self.setCentralWidget(splitter)
@@ -176,10 +156,10 @@ class SceneViewer(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(self.sidebar)
-        scroll.setMinimumWidth(345)
+        scroll.setMinimumWidth(240)
         splitter.addWidget(scroll)
 
-        self.models_group = models_group = QGroupBox("模型显隐（四个口扫 + 两个全牙列 + 两个颌骨）")
+        self.models_group = models_group = QGroupBox("模型显隐")
         model_layout = QVBoxLayout(models_group)
         self.model_list = QListWidget()
         self.model_list.setIconSize(QSize(14, 14))
@@ -187,19 +167,24 @@ class SceneViewer(QMainWindow):
         self.model_list.itemChanged.connect(self._visibility_changed)
         self.model_list.currentItemChanged.connect(self._selected_model)
         model_layout.addWidget(self.model_list)
-        buttons = QHBoxLayout()
-        for text, callback in (("只看下颌骨", lambda: self._set_preset("bones")),
-                               ("只看 CT 配准", lambda: self._set_preset("ct")),
-                               ("全部隐藏", lambda: self._set_preset("none"))):
+        buttons = QGridLayout()
+        for index, (text, callback) in enumerate((
+            ("下颌骨", lambda: self._set_preset("bones")),
+            ("关节", lambda: self._set_preset("joint")),
+            ("CT 配准", lambda: self._set_preset("ct")),
+            ("隐藏", lambda: self._set_preset("none")),
+        )):
             button = QPushButton(text)
             button.clicked.connect(callback)
-            buttons.addWidget(button)
+            buttons.addWidget(button, index // 2, index % 2)
         model_layout.addLayout(buttons)
         self.opacity = QSlider(Qt.Orientation.Horizontal)
         self.opacity.setRange(0, 100)
         self.opacity.setValue(100)
         self.opacity.valueChanged.connect(self._change_opacity)
-        model_layout.addWidget(QLabel("选中模型透明度（左侧透明，右侧不透明）"))
+        opacity_hint = QLabel("选中模型透明度（左侧透明，右侧不透明）")
+        opacity_hint.setWordWrap(True)
+        model_layout.addWidget(opacity_hint)
         model_layout.addWidget(self.opacity)
         color = QPushButton("更改选中模型的颜色")
         color.clicked.connect(self._change_color)
@@ -210,6 +195,9 @@ class SceneViewer(QMainWindow):
         condyle_layout = QVBoxLayout(condyles)
         self.condyle_info = QLabel("可在主界面“颌骨”的选区按钮中指定左右髁突。")
         self.condyle_info.setWordWrap(True)
+        info_policy = self.condyle_info.sizePolicy()
+        info_policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+        self.condyle_info.setSizePolicy(info_policy)
         self.condyle_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         condyle_layout.addWidget(self.condyle_info)
         self.show_condyles = QCheckBox("显示中心位移线")
@@ -218,35 +206,15 @@ class SceneViewer(QMainWindow):
         condyle_layout.addWidget(self.show_condyles)
         side.addWidget(condyles)
 
-        self.measure_group = measure = QGroupBox("两次下颌骨 · 标记与测量")
-        measure_layout = QVBoxLayout(measure)
-        measure_form = QFormLayout()
-        self.measure_mode = QComboBox()
-        for text, mode in (("浏览（不取点）", "browse"), ("下颌骨表面标记", "point"),
-                           ("骨间距离：两次骨面各 1 点", "length"), ("骨间角度：两次骨面各 2 点", "angle")):
-            self.measure_mode.addItem(text, mode)
-        self.measure_mode.currentIndexChanged.connect(self._mode_changed)
-        measure_form.addRow("操作模式", self.measure_mode)
-        measure_layout.addLayout(measure_form)
-        self.measure_hint = QLabel("只在两次下颌骨上取点，无需选择模型。")
-        self.measure_hint.setWordWrap(True)
-        self.measure_hint.setObjectName("measureHint")
-        self.measure_hint.setMinimumHeight(90)
-        measure_layout.addWidget(self.measure_hint)
-        self.measure_list = QListWidget()
-        self.measure_list.setMinimumHeight(115)
-        measure_layout.addWidget(self.measure_list)
-        actions = QHBoxLayout()
-        for text, callback in (("撤销", self._undo), ("删除选中", self._delete_measurement),
-                               ("清空", self._clear_measurements)):
-            button = QPushButton(text)
-            button.clicked.connect(callback)
-            actions.addWidget(button)
-        measure_layout.addLayout(actions)
-        save = QPushButton("导出测量记录 JSON（含点坐标和模型来源）")
-        save.clicked.connect(self._save_measurements)
-        measure_layout.addWidget(save)
-        side.addWidget(measure)
+        sections = QGroupBox("双侧髁突剖面")
+        section_controls = QVBoxLayout(sections)
+        self.section_button = QPushButton("启用双侧剖面")
+        self.section_button.clicked.connect(self.enable_sections)
+        section_controls.addWidget(self.section_button)
+        side.addWidget(sections)
+        self.export_button = QPushButton("导出髁突位移 / 剖面测量 JSON")
+        self.export_button.clicked.connect(self._save_measurements)
+        side.addWidget(self.export_button)
         side.addStretch(1)
 
         right = QWidget()
@@ -269,6 +237,7 @@ class SceneViewer(QMainWindow):
         self.render_window.SetAlphaBitPlanes(1)
         self.render_window.SetNumberOfLayers(2)
         self.renderer = vtkRenderer()
+        self.renderer.GetActiveCamera().ParallelProjectionOn()
         self.renderer.SetBackground(0.08, 0.105, 0.15)
         self.renderer.SetBackground2(0.19, 0.23, 0.30)
         self.renderer.GradientBackgroundOn()
@@ -285,7 +254,7 @@ class SceneViewer(QMainWindow):
         self.annotation_renderer.SetActiveCamera(self.renderer.GetActiveCamera())
         self.render_window.AddRenderer(self.annotation_renderer)
         self.interactor = self.render_window.GetInteractor()
-        self.interactor.SetInteractorStyle(vtkInteractorStyleTrackballCamera())
+        self.interactor.SetInteractorStyle(vtkInteractorStyleUser())
         self.orientation_axes = vtkAxesActor()
         self.orientation_axes.SetShaftTypeToLine()
         self.orientation_axes.SetTotalLength(1.0, 1.0, 1.0)
@@ -304,22 +273,56 @@ class SceneViewer(QMainWindow):
         self.orientation_widget.SetViewport(0.84, 0.02, 0.99, 0.18)
         self.orientation_widget.SetEnabled(1)
         self.orientation_widget.InteractiveOff()
-        # TrackballCamera grabs VTK focus on press, so an interactor release
-        # observer is not reliable. Observe the real Qt event stream instead.
-        self.click_filter = SurfaceClickFilter(self.vtk_widget)
-        self.vtk_widget.installEventFilter(self.click_filter)
-        self.click_filter.clicked.connect(self._pick_qt_position)
-        self.picker = vtkCellPicker()
-        self.picker.SetTolerance(0.0005)
-        self.picker.PickFromListOn()
-        right_layout.addWidget(self.vtk_widget, 1)
-        legend = QLabel("左键拖动旋转 · 中键平移 · 滚轮缩放。测量只命中两次下颌骨，按步骤自动切换；请按提示选点。\n"
-                        "模型单位按 mm 解释；这里显示的是刚性几何结果，不代表新的 CT 影像或临床诊断。")
+        self.gestures = ViewGestures(self)
+        self.vtk_widget.installEventFilter(self.gestures)
+        self._camera_timer = QTimer(self)
+        self._camera_timer.setSingleShot(True)
+        self._camera_timer.setInterval(16)
+        self._camera_timer.timeout.connect(self.render_window.Render)
+        self._camera_finish_timer = QTimer(self)
+        self._camera_finish_timer.setSingleShot(True)
+        self._camera_finish_timer.setInterval(140)
+        self._camera_finish_timer.timeout.connect(self.finish_interaction)
+        self.view_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.view_splitter.addWidget(self.vtk_widget)
+        lower = QSplitter(Qt.Orientation.Horizontal)
+        self.section_cards, self.section_labels, self.section_layouts = {}, {}, {}
+        for key, title in (("left", "左侧髁突剖面"), ("right", "右侧髁突剖面")):
+            card = QGroupBox(title)
+            card.setMinimumWidth(300)
+            content = QVBoxLayout(card)
+            label = QLabel("等待加载项目…")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setWordWrap(True)
+            content.addWidget(label)
+            self.section_cards[key], self.section_labels[key], self.section_layouts[key] = card, label, content
+            lower.addWidget(card)
+        self.view_splitter.addWidget(lower)
+        self.view_splitter.setStretchFactor(0, 1)
+        self.view_splitter.setStretchFactor(1, 1)
+        right_layout.addWidget(self.view_splitter, 1)
+        legend = QLabel("左拖旋转 · 中拖平移 · 右拖缩放 · 三维滚轮缩放 / 剖面滚轮移层")
         legend.setWordWrap(True)
         right_layout.addWidget(legend)
         splitter.addWidget(right)
-        splitter.setSizes([410, 1030])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
         self.statusBar().showMessage("等待加载配准结果…")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._default_layout_applied:
+            self._default_layout_applied = True
+            # Apply after the first layout has its actual window dimensions.
+            # Reopening a cached window preserves the user's divider positions.
+            QTimer.singleShot(0, self._set_default_view_sizes)
+
+    def _set_default_view_sizes(self):
+        splitter = self.centralWidget()
+        width = max(splitter.width() - splitter.handleWidth(), 1)
+        splitter.setSizes([width // 5, width - width // 5])
+        height = max(self.view_splitter.height() - self.view_splitter.handleWidth(), 1)
+        self.view_splitter.setSizes([height * 3 // 5, height - height * 3 // 5])
 
     def _run_task(self, operation, callback, message):
         if self._thread is not None:
@@ -356,10 +359,14 @@ class SceneViewer(QMainWindow):
         result, callback = self._task_result, self._task_callback
         self._thread = None
         self._task_result = self._task_callback = None
-        if result is not None and callback is not None:
-            callback(result)
-        if thread is not None:
-            thread.deleteLater()
+        try:
+            if result is not None and callback is not None:
+                callback(result)
+        except Exception as exc:
+            self._task_failed(str(exc))
+        finally:
+            if thread is not None:
+                thread.deleteLater()
 
     def load_project(self, path):
         keys = CT_INSPECTION_KEYS if self._preset == "ct" else BONE_KEYS
@@ -371,6 +378,14 @@ class SceneViewer(QMainWindow):
 
     @Slot(object)
     def set_scene(self, scene: SceneData):
+        self._dispose_sections()
+        for actor in self.actors.values():
+            self.renderer.RemoveActor(actor)
+        self.actors.clear()
+        self.polydata.clear()
+        self.condyle_report = None
+        self._rotation_center = None
+        self._inspection_active = None
         self.scene = scene
         allowed = set(COMPARISON_KEYS) | set(CT_INSPECTION_KEYS)
         self.models = {model.key: model for model in scene.models if model.key in allowed}
@@ -395,20 +410,147 @@ class SceneViewer(QMainWindow):
             if not self.condyle_report or not self.condyle_report["regions"]:
                 self.condyle_info.setText("尚未选取髁突面片。可在主界面“颌骨”的选区按钮中指定左右髁突。")
             else:
-                lines = ["所选面片的面积加权中心（不是球拟合中心）"]
+                from .condyles import displacement_description
+                lines = []
                 for key, region in self.condyle_report["regions"].items():
                     vector = region["displacement_xyz_mm"]
                     angles = region["direction_angles_to_positive_xyz_deg"]
-                    lines.append(f"\n{region['name']}：位移 {region['distance_mm']:.3f} mm")
-                    lines.append(f"ΔX {vector[0]:+.3f} / ΔY {vector[1]:+.3f} / ΔZ {vector[2]:+.3f} mm")
-                    lines.append("与 +X / +Y / +Z 的方向角：" + (" / ".join(f"{angle:.2f}°" for angle in angles) if angles else "零位移，无方向"))
+                    lines.append(f'<p style="color:#111111;font-size:15px"><b>{region["name"]} · 位移 {region["distance_mm"]:.3f} mm</b><br/>'
+                                 f'{displacement_description(key, vector)}</p>')
+                    lines.append('<p style="color:#7a818b;font-size:11px">'
+                                 f'ΔX {vector[0]:+.3f} / ΔY {vector[1]:+.3f} / ΔZ {vector[2]:+.3f} mm<br/>'
+                                 '与 +X / +Y / +Z 夹角：' + (' / '.join(f'{angle:.2f}°' for angle in angles) if angles else '零位移') + '</p>')
                     self._condyle_measurements.append({"id": key, "type": "length", "value": region["distance_mm"], "unit": "mm",
                         "anchors": [{"model": bone, "xyz_mm": region[f"center_t{index}_mm"], "triangle_id": -1}
                                     for index, bone in enumerate(BONE_KEYS)]})
-                lines.append(f"\n整个颌骨的刚体总旋转角：{self.condyle_report['rigid_rotation_degrees']:.2f}°")
-                lines.append("方向参考上颌口扫.1 的 XYZ，不等同于解剖方向；此旋转角不是单侧髁突独立旋转。")
-                self.condyle_info.setText("\n".join(lines))
+                rotation = self.condyle_report['rotation_minus_x_view']
+                angle = rotation['signed_degrees']
+                value = f' {abs(angle):.2f}°' if angle is not None and abs(angle) >= .005 else ''
+                lines.append(f'<p style="color:#111111;font-size:15px"><b>{rotation["label"]}{value}</b></p>')
+                lines.append(f'<p style="color:#7a818b;font-size:11px">三维总旋转：{self.condyle_report["rigid_rotation_degrees"]:.2f}°</p>')
+                self.condyle_info.setText(''.join(lines))
+        regions = (self.condyle_report or {}).get("regions", {})
+        center = np.mean([r["center_t0_mm"] for r in regions.values()], axis=0) if regions else None
+        if center is not None and (self._rotation_center is None or not np.allclose(center, self._rotation_center)):
+            self._rotation_center = center
+            self._reset_camera()
         self._redraw_measurements()
+        self._update_section_availability()
+
+    def _update_section_availability(self):
+        # Invalidate ROI caches only when the saved centers change.
+        regions = (self.condyle_report or {}).get("regions", {})
+        centers = {key: region["center_t0_mm"] for key, region in regions.items()}
+        previous = {key: view.state.center.tolist() for key, view in self.section_views.items()}
+        if self.section_views and centers != previous:
+            self._dispose_sections()
+        self.section_button.setEnabled(bool(regions) and not self._sections_enabled)
+        self.section_button.setText("剖面已启用" if self._sections_enabled else "启用双侧剖面")
+        for key, label in self.section_labels.items():
+            if key not in regions:
+                label.setText("此侧未保存髁突选区。\n可在主界面选择此侧面片；另一侧仍可使用。")
+            elif key not in self.section_views:
+                label.setText("已保存此侧髁突选区。\n点击左侧“启用双侧剖面”加载 20 mm 局部截线。")
+
+    def enable_sections(self):
+        if self._sections_enabled or self._thread is not None or not self.scene:
+            return
+        regions = (self.condyle_report or {}).get("regions", {})
+        if not regions:
+            self._update_section_availability()
+            return
+        # Optional maxilla is requested only if actually present in this project.
+        available = self.models.keys() | self.scene.deferred_keys
+        keys = tuple(key for key in JOINT_VIEW_KEYS if key in available)
+        if set(keys) - self.models.keys():
+            self._ensure_models(keys, self.enable_sections)
+            return
+        from .section_geometry import sphere_roi
+        arrays = {key: _mesh_arrays(self.models[key].mesh) for key in keys}
+        centers = {key: region["center_t0_mm"] for key, region in regions.items()}
+        self.section_sources = {key: self.polydata[key] for key in keys}
+
+        def build():
+            # NumPy only in worker: no render windows or actors cross Qt threads.
+            return {side: {key: sphere_roi(vertices, triangles, center)
+                           for key, (vertices, triangles, _) in arrays.items()}
+                    for side, center in centers.items()}
+
+        def ready(rois):
+            from .section_viewer import SectionView, SIDE_COLORS
+            self.section_rois = rois
+            for side, side_rois in rois.items():
+                view = SectionView(side, centers[side], side_rois, self.actors,
+                                   offscreen=self._offscreen, parent=self.section_cards[side])
+                self.section_layouts[side].addWidget(view)
+                self.section_labels[side].hide()
+                self.section_views[side] = view
+                disk = vtkRegularPolygonSource()
+                disk.SetNumberOfSides(64)
+                mapper = vtkPolyDataMapper()
+                mapper.SetInputConnection(disk.GetOutputPort())
+                actor = vtkActor()
+                actor.SetMapper(mapper)
+                actor.GetProperty().SetColor(*SIDE_COLORS[side])
+                actor.GetProperty().SetOpacity(.20)
+                actor.GetProperty().LightingOff()
+                actor.GetProperty().EdgeVisibilityOn()
+                actor.GetProperty().SetEdgeColor(*SIDE_COLORS[side])
+                actor.GetProperty().SetLineWidth(2)
+                actor.PickableOff()
+                # Exclude the planes from camera-fit bounds and from model picking.
+                actor.UseBoundsOff()
+                self.renderer.AddActor(actor)
+                self._section_planes[side] = (disk, actor)
+                view.plane_changed.connect(self._section_changed)
+                self._section_changed(side, False)
+            self.finish_interaction()
+            self._sections_enabled = True
+            self._update_section_availability()
+            if "ct_maxilla_t0" not in keys:
+                self.statusBar().showMessage("剖面已启用；此项目未提供固定上颌骨，仅显示两次颌骨截线。")
+            else:
+                self.statusBar().showMessage("剖面已启用。中键平移视野，右键拖动缩放；滚轮沿视线移动剖面。")
+
+        self._run_task(build, ready, "正在从已加载网格缓存双侧 20 mm ROI…")
+
+    def _section_changed(self, side, final=False):
+        view = self.section_views.get(side)
+        if view is None or side not in self._section_planes:
+            return
+        disk, actor = self._section_planes[side]
+        disk.SetCenter(*view.state.origin)
+        disk.SetNormal(*view.state.normal)
+        disk.SetRadius(max(view.state.disk_radius, 1e-6))
+        self.renderer.SetUseDepthPeeling(bool(final))
+        if final:
+            self._section_render_timer.stop()
+            self.render_sections_in_3d()
+        elif not self._section_render_timer.isActive():
+            self._section_render_timer.start()
+
+    def render_sections_in_3d(self):
+        if not hasattr(self, "render_window"):
+            return
+        for side, (_, actor) in self._section_planes.items():
+            actor.SetVisibility(self.section_views[side].state.disk_radius > 1e-6)
+        self.render_window.Render()
+
+    def _dispose_sections(self):
+        self._section_render_timer.stop()
+        for view in self.section_views.values():
+            view.dispose()
+            view.setParent(None)
+            view.deleteLater()
+        self.section_views.clear()
+        self.section_rois.clear()
+        self.section_sources.clear()
+        for _, actor in self._section_planes.values():
+            self.renderer.RemoveActor(actor)
+        self._section_planes.clear()
+        self._sections_enabled = False
+        for label in self.section_labels.values():
+            label.show()
 
     def _add_model_actors(self, models):
         for model in models:
@@ -428,10 +570,6 @@ class SceneViewer(QMainWindow):
             self.renderer.AddActor(actor)
             self.actors[model.key] = actor
             self.polydata[model.key] = data
-            locator = vtkStaticCellLocator()
-            locator.SetDataSet(data)
-            locator.BuildLocator()
-            self.picker.AddLocator(locator)
 
     def _ensure_models(self, keys, callback):
         missing = set(keys) - self.models.keys()
@@ -458,7 +596,13 @@ class SceneViewer(QMainWindow):
         )
 
     def _set_preset(self, preset):
-        required = CT_INSPECTION_KEYS if preset == "ct" else BONE_KEYS if preset == "bones" else ()
+        self._preset = preset
+        required = (
+            CT_INSPECTION_KEYS if preset == "ct"
+            else JOINT_VIEW_KEYS if preset == "joint"
+            else BONE_KEYS if preset == "bones"
+            else ()
+        )
         if self.scene and set(required) & self.scene.deferred_keys:
             self._ensure_models(required, lambda: self._set_preset(preset))
             return
@@ -490,22 +634,23 @@ class SceneViewer(QMainWindow):
             self.model_list.setFixedHeight(max(height, 60))
             self.model_list.setCurrentRow(0)
             self.models_group.setTitle(
-                "CT 配准检查（全牙列.1 + 下颌口扫.1）"
+                "CT 配准检查"
                 if inspection
-                else "模型显隐（四个口扫 + 两个全牙列 + 两个颌骨）"
+                else "模型显隐"
             )
-            self.measure_mode.setCurrentIndex(0)
-            self.pending.clear()
-            self.measure_group.setEnabled(not inspection and set(BONE_KEYS) <= self.models.keys())
             self.annotation_renderer.SetDraw(not inspection)
             self._redraw_measurements()
-            self._update_measure_hint()
-        keys = {"ct_mandible_t0", "ct_mandible_t1"} if preset == "bones" else (
-            {"baseline_lower", "ct_dentition_t0"} if preset == "ct" else set())
+        keys = (
+            set(BONE_KEYS) if preset == "bones"
+            else set(JOINT_VIEW_KEYS) & self.models.keys() if preset == "joint"
+            else {"baseline_lower", "ct_dentition_t0"} if preset == "ct"
+            else set()
+        )
         for row in range(self.model_list.count()):
             item = self.model_list.item(row)
             visible = item.data(Qt.ItemDataRole.UserRole) in keys
             item.setCheckState(Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked)
+        self.render_sections_in_3d()
         self._reset_camera()
 
     def _visibility_changed(self, item):
@@ -541,12 +686,87 @@ class SceneViewer(QMainWindow):
         if color.isValid():
             actor.GetProperty().SetColor(color.redF(), color.greenF(), color.blueF())
             item.setIcon(color_swatch_icon((color.redF(), color.greenF(), color.blueF())))
+            for view in self.section_views.values():
+                view.sync_colors(self.actors)
             self.render_window.Render()
 
     def _reset_camera(self):
+        camera = self.renderer.GetActiveCamera()
+        camera.ParallelProjectionOn()
         self.renderer.ResetCamera()
+        if self._rotation_center is not None and not self._inspection_active:
+            camera.OrthogonalizeViewUp()
+            normal = -np.array(camera.GetDirectionOfProjection())
+            bounds = self.renderer.ComputeVisiblePropBounds()
+            if bounds[0] <= bounds[1]:
+                corners = np.array([[x, y, z] for x in bounds[:2] for y in bounds[2:4] for z in bounds[4:]])
+                up = unit(camera.GetViewUp())
+                right = unit(np.cross(up, normal))
+                relative = corners - self._rotation_center
+                aspect = max(self.vtk_widget.width(), 1) / max(self.vtk_widget.height(), 1)
+                # ParallelScale is the viewport's half-height in world units.
+                # Fit around the condyle pivot, which can be far above the bone.
+                extent = max(float(np.max(np.abs(relative @ up))),
+                             float(np.max(np.abs(relative @ right))) / aspect)
+                camera.SetParallelScale(max(extent * 1.06, .5))
+                distance = max(camera.GetDistance(), float(np.max(relative @ normal)) + 1, 1)
+                camera.SetFocalPoint(*self._rotation_center)
+                camera.SetPosition(*(self._rotation_center + normal * distance))
         self.renderer.ResetCameraClippingRange()
         self.render_window.Render()
+
+    def rotate(self, dx, dy):
+        camera = self.renderer.GetActiveCamera()
+        pivot = self._rotation_center if self._rotation_center is not None and not self._inspection_active else np.array(camera.GetFocalPoint())
+        up = unit(camera.GetViewUp())
+        normal = -np.array(camera.GetDirectionOfProjection())
+        right = unit(np.cross(up, normal))
+        yaw, pitch = np.deg2rad([-dx * .4, -dy * .4])
+        def turn(vector):
+            return _rotate(_rotate(vector, up, yaw), _rotate(right, up, yaw), pitch)
+        camera.SetPosition(*(pivot + turn(np.array(camera.GetPosition()) - pivot)))
+        camera.SetFocalPoint(*(pivot + turn(np.array(camera.GetFocalPoint()) - pivot)))
+        camera.SetViewUp(*turn(up))
+        camera.OrthogonalizeViewUp()
+        self._schedule_camera()
+
+    def pan(self, dx, dy):
+        camera = self.renderer.GetActiveCamera()
+        up = unit(camera.GetViewUp())
+        right = unit(np.cross(up, -np.array(camera.GetDirectionOfProjection())))
+        height_mm = 2 * camera.GetParallelScale()
+        shift = (-dx * right + dy * up) * height_mm / max(self.vtk_widget.height(), 1)
+        camera.SetPosition(*(np.array(camera.GetPosition()) + shift))
+        camera.SetFocalPoint(*(np.array(camera.GetFocalPoint()) + shift))
+        self._schedule_camera()
+
+    def zoom(self, factor, *, interactive=False):
+        camera = self.renderer.GetActiveCamera()
+        camera.SetParallelScale(float(np.clip(camera.GetParallelScale() * factor, .5, 1000)))
+        self._schedule_camera() if interactive else self.finish_interaction()
+
+    def scroll(self, steps):
+        self.zoom(float(np.exp(np.clip(-steps * .12, -2, 2))), interactive=True)
+
+    def pick_qt_position(self, position):
+        return False  # The upper 3D view no longer offers manual point picking.
+
+    def _schedule_camera(self):
+        self.renderer.SetUseDepthPeeling(False)
+        self.renderer.ResetCameraClippingRange()
+        if not self._camera_timer.isActive():
+            self._camera_timer.start()
+        self._camera_finish_timer.start()
+
+    def finish_interaction(self):
+        self._camera_timer.stop()
+        self._camera_finish_timer.stop()
+        self.renderer.SetUseDepthPeeling(True)
+        self.renderer.ResetCameraClippingRange()
+        self.render_window.Render()
+
+    def has_section_measurements(self):
+        return any(view.measurements or view.pending for view in self.section_views.values())
 
     def _axis_view(self, axis):
         direction = str(axis).strip().upper()
@@ -560,136 +780,6 @@ class SceneViewer(QMainWindow):
         camera.SetPosition(*(center + vector * max(camera.GetDistance(), 1)))
         camera.SetViewUp(*((0, 1, 0) if name == "Z" else (0, 0, 1)))
         self._reset_camera()
-
-    def _mode_changed(self):
-        self.pending.clear()
-        if not self._inspection_active and self.measure_mode.currentData() != "browse":
-            # Starting a bone measurement makes both bones available without a target selector.
-            for row in range(self.model_list.count()):
-                item = self.model_list.item(row)
-                key = item.data(Qt.ItemDataRole.UserRole)
-                if key in BONE_KEYS:
-                    item.setCheckState(Qt.CheckState.Checked)
-                    if self.actors[key].GetProperty().GetOpacity() <= 0:
-                        self.actors[key].GetProperty().SetOpacity(1)
-            self._selected_model(self.model_list.currentItem(), None)
-        self._redraw_measurements()
-        self._update_measure_hint()
-        self.statusBar().showMessage("已切换操作模式，未完成的取点已清除。取点会在两次下颌骨间自动切换。")
-
-    def _update_measure_hint(self):
-        if self._inspection_active:
-            text = "CT 配准检查中不取测量点。点击“只看下颌骨”返回骨间测量。"
-        elif not set(BONE_KEYS) <= self.models.keys():
-            text = "需要两次下颌骨模型，当前数据不足，不能测量骨间差距。"
-        else:
-            mode = self.measure_mode.currentData()
-            targets = bone_pick_keys(mode, self.pending)
-            if mode == "browse":
-                text = "仅测量两个下颌骨，无需选择取点模型。距离在两次骨面各取 1 点；角度在两次骨面各画 1 条线。"
-            elif mode == "point":
-                text = "点击任一下颌骨表面放置标记。重叠处首点命中靠近相机的骨面，记录会注明 T0/T1。"
-            elif not self.pending:
-                text = ("第 1/2 点：点击任一下颌骨；下一点自动锁定另一骨面。距离为手选两点的直线长度，不会自动寻找对应解剖点。"
-                        if mode == "length" else
-                        "第 1/4 点：在任一下颌骨开始画线。先在该骨取 2 点，再自动切到另一骨取 2 点；两条线须按同一解剖方向取点。")
-            else:
-                title = self.models[targets[0]].title
-                count = 2 if mode == "length" else 4
-                text = f"第 {len(self.pending) + 1}/{count} 点：已自动锁定「{title}」。"
-                text += "请点击另一骨面上的比较位置。" if mode == "length" else "请按两条线相同的解剖方向继续取点。"
-                text += "即使两骨重叠，也只取当前这一次骨面。"
-        self.measure_hint.setText(text)
-
-    def _pick_qt_position(self, position):
-        width, height = self.render_window.GetSize()
-        # Use this widget's actual framebuffer size (including per-monitor DPI),
-        # not the global cursor screen or the stale VTK event position.
-        x = position.x() * width / max(self.vtk_widget.width(), 1)
-        y = (self.vtk_widget.height() - 1 - position.y()) * height / max(self.vtk_widget.height(), 1)
-        self.pick_at(x, y)
-
-    def pick_at(self, x, y):
-        """VTK display coordinates have their origin at the lower left."""
-        if self._thread is not None or self._inspection_active or self.measure_mode.currentData() == "browse":
-            return False
-        if not set(BONE_KEYS) <= self.models.keys():
-            self.statusBar().showMessage("需要两次下颌骨模型才能测量。")
-            return False
-        keys = bone_pick_keys(self.measure_mode.currentData(), self.pending)
-        self.picker.InitializePickList()
-        for key in keys:
-            actor = self.actors[key]
-            if actor.GetVisibility() and actor.GetProperty().GetOpacity() > 0:
-                self.picker.AddPickList(actor)
-        if not self.picker.GetPickList().GetNumberOfItems():
-            self.statusBar().showMessage("当前步骤需要的下颌骨已隐藏或完全透明，请恢复显示后继续。")
-            return False
-        if not self.picker.Pick(float(x), float(y), 0, self.renderer):
-            self.statusBar().showMessage("未点中当前步骤的下颌骨，请按提示旋转或放大后再试。")
-            return False
-        picked_actor = self.picker.GetActor()
-        key = next((key for key in keys if self.actors[key] == picked_actor), None)
-        if key is None:
-            return False
-        return self.add_anchor(key, self.picker.GetPickPosition(), self.picker.GetCellId())
-
-    def add_anchor(self, key, xyz, cell_id):
-        mode = self.measure_mode.currentData()
-        if (self._inspection_active or not set(BONE_KEYS) <= self.models.keys()
-                or key not in bone_pick_keys(mode, self.pending)):
-            self.statusBar().showMessage("该点不属于当前步骤要求的下颌骨，未添加。")
-            return False
-        try:
-            point_array([xyz], 1)
-        except ValueError as exc:
-            self.statusBar().showMessage(str(exc))
-            return False
-        if mode == "angle" and len(self.pending) in (1, 3):
-            if length_mm([self.pending[-1]["xyz_mm"], xyz]) < 1e-6:
-                self.statusBar().showMessage("线段不能为零长度，请重新选择终点。")
-                return False
-        anchor = {"model": key, "xyz_mm": [float(value) for value in xyz], "triangle_id": int(cell_id)}
-        self.pending.append(anchor)
-        required = {"point": 1, "length": 2, "angle": 4}[mode]
-        if len(self.pending) == required:
-            points = [point["xyz_mm"] for point in self.pending]
-            try:
-                value = length_mm(points) if mode == "length" else segment_angle_degrees(points) if mode == "angle" else None
-            except ValueError as exc:
-                self.pending.pop()
-                self.statusBar().showMessage(str(exc))
-                return False
-            self.measurements.append({
-                "id": f"M{self._next_measurement:03d}", "type": mode,
-                "anchors": list(self.pending), "value": value,
-                "unit": "mm" if mode == "length" else "deg" if mode == "angle" else None,
-                "segments": [[0, 1], [2, 3]] if mode == "angle" else [[0, 1]] if mode == "length" else [],
-                "definition": "cross_bone_ordered_segments" if mode == "angle" else "manual_cross_bone_distance" if mode == "length" else "bone_surface_marker",
-            })
-            self._next_measurement += 1
-            self.pending.clear()
-            self._refresh_measurement_list()
-            self.statusBar().showMessage("测量已记录。可继续取点，或切回浏览模式。")
-        else:
-            self.statusBar().showMessage(f"已取 {len(self.pending)}/{required} 点；请按提示继续，程序自动切换骨面。")
-        self._update_measure_hint()
-        self._redraw_measurements()
-        return True
-
-    def _refresh_measurement_list(self):
-        self.measure_list.clear()
-        for record in self.measurements:
-            if record["type"] == "point":
-                xyz = record["anchors"][0]["xyz_mm"]
-                bone = "T0" if record["anchors"][0]["model"] == BONE_KEYS[0] else "T1"
-                text = f"{bone} 标记：({xyz[0]:.3f}, {xyz[1]:.3f}, {xyz[2]:.3f}) mm"
-            else:
-                label = "骨间距离" if record["type"] == "length" else "两骨线段夹角"
-                text = f"{label}：{record['value']:.3f} {record['unit']}"
-            item = QListWidgetItem(text)
-            item.setToolTip("\n".join(f"P{i + 1} {self.models[p['model']].title}: {p['xyz_mm']} mm" for i, p in enumerate(record["anchors"])))
-            self.measure_list.addItem(item)
 
     def _surface_circle(self, anchor, color):
         mesh = self.models[anchor["model"]].mesh
@@ -753,11 +843,9 @@ class SceneViewer(QMainWindow):
         for actor in self._overlays:
             self.annotation_renderer.RemoveActor(actor)
         self._overlays.clear()
-        records = [*self.measurements]
+        records = []
         if self.show_condyles.isChecked() and set(BONE_KEYS) <= self.models.keys():
             records.extend(self._condyle_measurements)
-        if self.pending:
-            records.append({"id": f"M{self._next_measurement:03d}", "anchors": self.pending, "value": None, "type": self.measure_mode.currentData()})
         for record in records:
             points = [np.asarray(anchor["xyz_mm"]) for anchor in record["anchors"]]
             for index, point in enumerate(points):
@@ -774,49 +862,27 @@ class SceneViewer(QMainWindow):
                 self._text(center, f"{record['value']:.3f} {unit}", (8, 12), 15)
         self.render_window.Render()
 
-    def _undo(self):
-        if self.pending:
-            self.pending.pop()
-        elif self.measurements:
-            self.measurements.pop()
-        self._refresh_measurement_list()
-        self._redraw_measurements()
-        self._update_measure_hint()
-
-    def _delete_measurement(self):
-        row = self.measure_list.currentRow()
-        if 0 <= row < len(self.measurements):
-            self.measurements.pop(row)
-            self._refresh_measurement_list()
-            self._redraw_measurements()
-
-    def _clear_measurements(self):
-        if not self.measurements and not self.pending:
-            return
-        if QMessageBox.question(self, "清空测量", "清空当前窗口的全部标记与测量？已导出的文件不会被删除。") != QMessageBox.StandardButton.Yes:
-            return
-        self.measurements.clear()
-        self.pending.clear()
-        self._refresh_measurement_list()
-        self._redraw_measurements()
-        self._update_measure_hint()
-
     def measurement_payload(self):
         return {
-            "schema_version": 2, "created_at": datetime.now().astimezone().isoformat(),
+            "schema_version": 4, "created_at": datetime.now().astimezone().isoformat(),
             "project": str(self.scene.project_path) if self.scene else None,
             "coordinate_reference": self.scene.coordinate_reference if self.scene else None,
-            "coordinate_units": "mm", "length_definition": "Euclidean distance between manually selected points on different mandibles; not automatic correspondence",
-            "angle_definition": "3D angle between ordered segments P1->P2 and P3->P4 on different mandibles, range 0 to 180 deg",
+            "coordinate_units": "mm", "length_definition": "Euclidean distance between manually selected visible section contour points",
             "models": {key: {"path": str(self.models[key].path), "sha256": self.models[key].sha256}
-                       for key in BONE_KEYS if key in self.models},
-            "measurements": self.measurements,
+                       for key in JOINT_VIEW_KEYS if key in self.models},
+            "measurements": [],  # Reserved legacy 3D measurement field.
             "condyle_analysis": self.condyle_report,
+            "condyle_sections": {
+                "definition": "manual distances on real mesh contours; no inferred fossa surface",
+                "sides": {key: {"plane": view.state.snapshot(), "measurements": view.measurements}
+                          for key, view in self.section_views.items()},
+            },
         }
 
     def _save_measurements(self):
-        if not self.measurements and not (self.condyle_report and self.condyle_report["regions"]):
-            QMessageBox.information(self, "没有测量记录", "请先完成标记、长度或角度测量。")
+        if (not (self.condyle_report and self.condyle_report["regions"])
+                and not any(v.measurements for v in self.section_views.values())):
+            QMessageBox.information(self, "没有测量记录", "请先选择髁突或完成剖面距离测量。")
             return
         directory = self.scene.project_path.parent if self.scene else Path.cwd()
         default = directory / f"measurements_{datetime.now():%Y%m%d_%H%M%S}.json"
@@ -849,11 +915,14 @@ class SceneViewer(QMainWindow):
             self.hide()
             event.ignore()
             return
-        if self.measurements:
+        if self.has_section_measurements():
             answer = QMessageBox.question(self, "关闭查看器", "关闭后当前标记不会自动保存。确认关闭？如需保存请先导出测量记录。")
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+        self._camera_timer.stop()
+        self._camera_finish_timer.stop()
+        self._dispose_sections()
         self.vtk_widget.Finalize()
         super().closeEvent(event)
 

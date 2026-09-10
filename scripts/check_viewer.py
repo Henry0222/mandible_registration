@@ -26,24 +26,26 @@ from mandible_registration.scene_data import BONE_KEYS
 
 def screenshot(window, path):
     QApplication.processEvents()
-    window.render_window.Render()
-    capture = vtk.vtkWindowToImageFilter()
-    capture.SetInput(window.render_window)
-    capture.SetInputBufferTypeToRGB()
-    capture.ReadFrontBufferOff()
-    capture.Update()
-    data = capture.GetOutput()
-    width, height, _ = data.GetDimensions()
-    pixels = vtk_to_numpy(data.GetPointData().GetScalars()).reshape(height, width, 3)
-    pixels = np.ascontiguousarray(pixels[::-1])
-    assert pixels.std() > 15, "Render unexpectedly empty"
-    image = QImage(pixels.data, width, height, width * 3, QImage.Format.Format_RGB888).copy()
-    # Native VTK owns its framebuffer; combine that buffer with the real Qt widget grab.
+    # Native VTK owns each framebuffer; composite all three onto the Qt grab.
     pixmap = window.grab()
     painter = QPainter(pixmap)
-    rect = window.vtk_widget.rect()
-    rect.moveTopLeft(window.vtk_widget.mapTo(window, rect.topLeft()))
-    painter.drawImage(rect, image)
+    for view in (window, *getattr(window, "section_views", {}).values()):
+        view.render_window.Render()
+        capture = vtk.vtkWindowToImageFilter()
+        capture.SetInput(view.render_window)
+        capture.SetInputBufferTypeToRGB()
+        capture.ReadFrontBufferOff()
+        capture.Update()
+        data = capture.GetOutput()
+        width, height, _ = data.GetDimensions()
+        pixels = vtk_to_numpy(data.GetPointData().GetScalars()).reshape(height, width, 3)
+        pixels = np.ascontiguousarray(pixels[::-1])
+        if view is window:
+            assert pixels.std() > 15, "Render unexpectedly empty"
+        image = QImage(pixels.data, width, height, width * 3, QImage.Format.Format_RGB888).copy()
+        rect = view.vtk_widget.rect()
+        rect.moveTopLeft(view.vtk_widget.mapTo(window, rect.topLeft()))
+        painter.drawImage(rect, image)
     painter.end()
     assert pixmap.save(str(path))
 
@@ -98,8 +100,8 @@ def main():
     gui.grab().save(str(args.output / "main_partial.png"))
     gui._load_project(args.project)
     app.processEvents()
-    assert gui.run_button.isEnabled()
     assert len(gui._review_paths) == 3
+    assert gui._project_path == args.project.resolve()
     gui.grab().save(str(args.output / "main_complete.png"))
     diagram_image = QImage(1380, 560, QImage.Format.Format_ARGB32)
     diagram_image.fill(QColor("#f4f7fb"))
@@ -126,6 +128,7 @@ def main():
     dialog.reject()
     dialog.deleteLater()
     gui.close()
+    warnings.clear()
     dark_palette()
     viewer = SceneViewer(offscreen=not args.native)
     viewer.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
@@ -136,79 +139,31 @@ def main():
     viewer.load_project(args.project)
     wait_for_task(app, viewer)
     assert viewer.scene is not None, warnings
-    assert set(viewer.models) == set(BONE_KEYS), (list(viewer.models), warnings)
-    assert len(viewer.scene.deferred_keys) == 5
-    assert viewer.model_list.count() == 6
-    assert viewer.map_source.count() == 6
+    assert set(BONE_KEYS) <= set(viewer.models), (list(viewer.models), warnings)
+    assert viewer.scene.deferred_keys
     assert not hasattr(viewer, "pick_target")
+    assert not hasattr(viewer, "map_mode")
     assert not warnings, warnings
     assert {key for key, actor in viewer.actors.items() if actor.GetVisibility()} == {"ct_mandible_t0", "ct_mandible_t1"}
-    print("Loaded bones first; 5 other models remain deferred", flush=True)
+    print(f"Loaded bones first; {len(viewer.scene.deferred_keys)} other models remain deferred", flush=True)
     viewer._axis_view("Y")
     screenshot(viewer, args.output / "viewer_bones.png")
 
-    def click_surface(x, y):
-        width, height = viewer.render_window.GetSize()
-        point = QPoint(round(x * viewer.vtk_widget.width() / width),
-                       round(viewer.vtk_widget.height() - 1 - y * viewer.vtk_widget.height() / height))
-        QTest.mouseClick(viewer.vtk_widget, Qt.MouseButton.LeftButton, pos=point)
-        app.processEvents()
-
-    viewer.map_mode.setCurrentIndex(1)
-    viewer._calculate_map()
-    wait_for_task(app, viewer)
-    assert viewer._map_key == "ct_mandible_t1", warnings
-    print("Motion mm min/mean/max:", np.min(viewer._map_values), np.mean(viewer._map_values), np.max(viewer._map_values), flush=True)
-    viewer.measure_mode.setCurrentIndex(2)
-    # Exercise actual world-to-display surface picks, not synthetic anchor injection.
-    vertices = np.asarray(viewer.models["ct_mandible_t1"].mesh.vertices)
-    for index in np.linspace(0, len(vertices) - 1, 30, dtype=int):
-        viewer.renderer.SetWorldPoint(*vertices[index], 1)
-        viewer.renderer.WorldToDisplay()
-        x, y, _ = viewer.renderer.GetDisplayPoint()
-        click_surface(x, y)
-        if viewer.measurements:
-            break
-    assert viewer.measurements and viewer.measurements[0]["type"] == "length"
-    assert {anchor["model"] for anchor in viewer.measurements[0]["anchors"]} == set(BONE_KEYS)
-    screenshot(viewer, args.output / "viewer_motion_measurement.png")
-    viewer.measure_mode.setCurrentIndex(3)
-    for index in np.linspace(0, len(vertices) - 1, 60, dtype=int):
-        viewer.renderer.SetWorldPoint(*vertices[index], 1)
-        viewer.renderer.WorldToDisplay()
-        x, y, _ = viewer.renderer.GetDisplayPoint()
-        click_surface(x, y)
-        if len(viewer.measurements) == 2:
-            break
-    assert len(viewer.measurements) == 2
-    angle = viewer.measurements[1]
-    assert angle["type"] == "angle" and len(angle["anchors"]) == 4
-    keys = [anchor["model"] for anchor in angle["anchors"]]
-    assert keys[0] == keys[1] and keys[2] == keys[3] and keys[0] != keys[2]
-    screenshot(viewer, args.output / "viewer_bone_angle.png")
+    assert not hasattr(viewer, "measure_mode")
+    assert not hasattr(viewer, "picker")
+    assert not hasattr(viewer, "section_info")
+    assert not hasattr(viewer, "show_section_planes")
     viewer._set_preset("ct")
     wait_for_task(app, viewer)
     assert viewer.model_list.count() == 2
-    viewer.map_mode.setCurrentIndex(0)
-    viewer._set_combo(viewer.map_source, "baseline_lower")
-    viewer._set_combo(viewer.map_reference, "ct_dentition_t0")
-    viewer._calculate_map()
-    wait_for_task(app, viewer)
-    assert viewer._map_key == "baseline_lower", warnings
-    print("IOS to CT surface mm min/mean/max:", np.min(viewer._map_values), np.mean(viewer._map_values), np.max(viewer._map_values), flush=True)
-    viewer.measurements.clear()
-    viewer.pending.clear()
-    viewer._refresh_measurement_list()
-    viewer._redraw_measurements()
     viewer._set_preset("ct")
     assert {key for key, actor in viewer.actors.items() if actor.GetVisibility()} == {"ct_dentition_t0", "baseline_lower"}
     viewer._axis_view("Z")
-    viewer.map_max.setValue(1)
     screenshot(viewer, args.output / "viewer_ct_surface.png")
     viewer.close()
     app.processEvents()
     assert not warnings, warnings
-    print("PASS: theme/dialogs, six model options, CT inspection, both maps, automatic cross-bone distance and 4-point angle, clean shutdown.", flush=True)
+    print("PASS: theme/dialogs, model options, CT inspection, removed 3D point tools, clean shutdown.", flush=True)
 
 
 if __name__ == "__main__":
